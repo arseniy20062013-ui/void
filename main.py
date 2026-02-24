@@ -1,13 +1,7 @@
 import asyncio
 import json
-import os
-import subprocess
-import sys
-from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -20,109 +14,60 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
-# Состояние системы
-SYSTEM_STATE = {
-    "is_active": True,
-    "total_visits": 0,
-    "current_repo": "None"
+# Состояние системы (управляется ботом)
+VOID_CORE = {
+    "is_active": True,  # Главный рубильник
+    "visits": 0
 }
-active_connections = set()
+active_sessions = set()
 
-# Состояния для FSM (скачивание с GitHub)
-class SetupStates(StatesGroup):
-    waiting_for_url = State()
-
+# Чтобы сайт мог подключаться без ошибок
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# --- ФУНКЦИЯ УСТАНОВКИ С GITHUB ---
-def setup_github_project(url):
-    try:
-        repo_name = url.split('/')[-1].replace('.git', '')
-        # Клонирование
-        subprocess.run(f"git clone {url}", shell=True, check=True)
-        # Установка зависимостей
-        if os.path.exists(f"{repo_name}/requirements.txt"):
-            subprocess.run(f"{sys.executable} -m pip install -r {repo_name}/requirements.txt", shell=True)
-        SYSTEM_STATE["current_repo"] = repo_name
-        return True
-    except Exception as e:
-        print(f"Ошибка установки: {e}")
-        return False
+# --- ТЕЛЕГРАМ ПУЛЬТ ---
+def get_kb():
+    label = "🔴 ВЫКЛЮЧИТЬ САЙТ" if VOID_CORE["is_active"] else "🟢 ВКЛЮЧИТЬ САЙТ"
+    return types.ReplyKeyboardMarkup(keyboard=[
+        [types.KeyboardButton(text=label)],
+        [types.KeyboardButton(text="📊 СТАТИСТИКА")]
+    ], resize_keyboard=True)
 
-# --- ЛОГИКА ТЕЛЕГРАМ БОТА ---
-def get_main_kb():
-    status = "🔴 ВЫКЛЮЧИТЬ САЙТ" if SYSTEM_STATE["is_active"] else "🟢 ВКЛЮЧИТЬ САЙТ"
-    kb = [
-        [types.KeyboardButton(text=status)],
-        [types.KeyboardButton(text="📊 Статистика")],
-        [types.KeyboardButton(text="📥 Скачать проект с GitHub")]
-    ]
-    return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-
-@dp.message(F.from_user.id == MY_ID, Command("start"))
-async def start_cmd(m: types.Message):
-    await m.answer("🕹 **VOID CORE**: Система управления запущена.", reply_markup=get_main_kb(), parse_mode="Markdown")
+@dp.message(Command("start"), F.from_user.id == MY_ID)
+async def start(m: types.Message):
+    await m.answer("🕹 VOID CORE ACTIVE", reply_markup=get_kb())
 
 @dp.message(F.from_user.id == MY_ID, F.text.contains("САЙТ"))
-async def toggle_site(m: types.Message):
-    SYSTEM_STATE["is_active"] = not SYSTEM_STATE["is_active"]
-    status = "ОНЛАЙН" if SYSTEM_STATE["is_active"] else "ОФФЛАЙН"
-    await m.answer(f"🌐 Статус сайта изменен на: **{status}**", reply_markup=get_main_kb(), parse_mode="Markdown")
+async def toggle(m: types.Message):
+    VOID_CORE["is_active"] = not VOID_CORE["is_active"]
+    status = "ОНЛАЙН" if VOID_CORE["is_active"] else "ОФФЛАЙН (ЗАБЛОКИРОВАН)"
+    await m.answer(f"📢 Статус изменен: {status}", reply_markup=get_kb())
 
-@dp.message(F.from_user.id == MY_ID, F.text == "📊 Статистика")
-async def send_stats(m: types.Message):
-    msg = (f"📈 **VOID STATS**\n\n"
-           f"👥 Онлайн: `{len(active_connections)}` чел.\n"
-           f"🚀 Всего визитов: `{SYSTEM_STATE['total_visits']}`\n"
-           f"📦 Репозиторий: `{SYSTEM_STATE['current_repo']}`\n"
-           f"🌐 Доступ: {'✅ Открыт' if SYSTEM_STATE['is_active'] else '❌ Закрыт'}")
-    await m.answer(msg, parse_mode="Markdown")
+@dp.message(F.text == "📊 СТАТИСТИКА")
+async def stats(m: types.Message):
+    await m.answer(f"👥 Онлайн: {len(active_sessions)}\n🚀 Всего заходов: {VOID_CORE['visits']}")
 
-@dp.message(F.from_user.id == MY_ID, F.text == "📥 Скачать проект с GitHub")
-async def ask_repo(m: types.Message, state: FSMContext):
-    await m.answer("🔗 Пришли ссылку на GitHub репозиторий (.git):")
-    await state.set_state(SetupStates.waiting_for_url)
-
-@dp.message(SetupStates.waiting_for_url)
-async def process_repo(m: types.Message, state: FSMContext):
-    url = m.text
-    await m.answer("⏳ Начинаю клонирование и установку библиотек...")
-    
-    success = await asyncio.to_thread(setup_github_project, url)
-    
-    if success:
-        await m.answer(f"✅ Проект `{SYSTEM_STATE['current_repo']}` успешно скачан и настроен!")
-    else:
-        await m.answer("❌ Ошибка при скачивании. Проверь ссылку или наличие Git.")
-    await state.clear()
-
-# --- API И WEBSOCKET ДЛЯ САЙТА ---
+# --- УПРАВЛЕНИЕ САЙТОМ (WebSocket) ---
 @app.websocket("/ws/void")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    active_connections.add(websocket)
-    SYSTEM_STATE["total_visits"] += 1
+    active_sessions.add(websocket)
+    VOID_CORE["visits"] += 1
     try:
         while True:
-            # Каждую секунду шлем инфо на сайт
-            await websocket.send_text(json.dumps({
-                "is_active": SYSTEM_STATE["is_active"],
-                "online": len(active_connections),
-                "time": datetime.now().strftime("%H:%M:%S")
-            }))
-            await asyncio.sleep(1)
+            # Отправляем на сайт статус: если active=False, сайт должен "выключиться"
+            await websocket.send_json({
+                "active": VOID_CORE["is_active"],
+                "online": len(active_sessions)
+            })
+            await asyncio.sleep(1) # Обновление раз в секунду
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
+        active_sessions.remove(websocket)
 
-# --- ЕДИНЫЙ ЗАПУСК ---
-async def run_system():
-    # Запуск сервера на порту 7066
-    config = uvicorn.Config(app, host="0.0.0.0", port=7066, loop="asyncio")
-    server = uvicorn.Server(config)
-    
-    print("💎 VOID CORE IS LIVE ON PORT 7066")
-    # Запускаем бота и сервер одновременно
+# --- ЗАПУСК ---
+async def main():
+    # Запускаем сервер на 7066 и бота одновременно
+    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=7066, loop="asyncio"))
     await asyncio.gather(server.serve(), dp.start_polling(bot))
 
 if __name__ == "__main__":
-    asyncio.run(run_system())
+    asyncio.run(main())
