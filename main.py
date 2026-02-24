@@ -1,13 +1,16 @@
 import asyncio
-import logging
+import os
+import shutil
+import subprocess
+import sys
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from fastapi import FastAPI
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 
-# Настройка логов (увидишь ошибки в консоли)
-logging.basicConfig(level=logging.INFO)
-
+# --- КОНФИГ ---
 TOKEN = "8786648200:AAHWlhGJO9PzNLBCEoNAxFnADZebmvPsgb0"
 MY_ID = 7173827114
 
@@ -15,46 +18,90 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
-# Состояние сайта
-site_enabled = True
+class DeployState(StatesGroup):
+    waiting_for_url = State()
 
-# --- КНОПКИ ---
+SYSTEM_STATE = {"is_active": True}
+active_ws = set()
+
+# --- ФУНКЦИЯ КЛОНИРОВАНИЯ (БЕЗ ОШИБОК) ---
+def safe_deploy(url):
+    try:
+        repo_name = url.split("/")[-1].replace(".git", "")
+        
+        # Если папка есть — удаляем её полностью
+        if os.path.exists(repo_name):
+            shutil.rmtree(repo_name)
+            
+        # Клонируем
+        result = subprocess.run(["git", "clone", url], capture_output=True, text=True)
+        if result.returncode != 0:
+            return False, f"Git error: {result.stderr}"
+
+        # Ставим зависимости
+        req_path = os.path.join(repo_name, "requirements.txt")
+        if os.path.exists(req_path):
+            subprocess.run([sys.executable, "-m", "pip", "install", "-r", req_path])
+            
+        return True, repo_name
+    except Exception as e:
+        return False, str(e)
+
+# --- МЕНЮ БОТА ---
 def get_kb():
-    label = "🔴 ВЫКЛЮЧИТЬ" if site_enabled else "🟢 ВКЛЮЧИТЬ"
-    kb = [[types.KeyboardButton(text=label)]]
+    status_text = "🔴 ВЫКЛ САЙТ" if SYSTEM_STATE["is_active"] else "🟢 ВКЛ САЙТ"
+    kb = [
+        [types.KeyboardButton(text="📥 СКАЧАТЬ С GITHUB")],
+        [types.KeyboardButton(text=status_text)],
+        [types.KeyboardButton(text="📊 СТАТУС")]
+    ]
     return types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# --- ОБРАБОТЧИКИ БОТА ---
 @dp.message(Command("start"), F.from_user.id == MY_ID)
-async def cmd_start(m: types.Message):
-    print(f"Пользователь {m.from_user.id} нажал старт")
-    await m.answer("🕹 Пульт управления сайтом VOID активен.", reply_markup=get_kb())
+async def start(m: types.Message):
+    await m.answer("🕹 VOID CORE: Управление запущено", reply_markup=get_kb())
 
-@dp.message(F.from_user.id == MY_ID)
-async def handle_all(m: types.Message):
-    global site_enabled
-    if "ВКЛЮЧИТЬ" in m.text or "ВЫКЛЮЧИТЬ" in m.text:
-        site_enabled = not site_enabled
-        status = "РАБОТАЕТ" if site_enabled else "ВЫКЛЮЧЕН"
-        await m.answer(f"Сайт теперь {status}", reply_markup=get_kb())
-    else:
-        await m.answer("Используй кнопки меню.")
+@dp.message(F.text == "📥 СКАЧАТЬ С GITHUB", F.from_user.id == MY_ID)
+async def ask_url(m: types.Message, state: FSMContext):
+    await m.answer("🔗 Пришли ссылку на .git репозиторий:")
+    await state.set_state(DeployState.waiting_for_url)
 
-# --- ЗАПУСК ---
-async def main():
-    # Настройка сервера
-    config = uvicorn.Config(app, host="0.0.0.0", port=8080, loop="asyncio")
-    server = uvicorn.Server(config)
+@dp.message(DeployState.waiting_for_url)
+async def process_url(m: types.Message, state: FSMContext):
+    url = m.text
+    await m.answer("⏳ Клонирую и настраиваю... подожди.")
     
-    print("--- ЗАПУСК СИСТЕМЫ ---")
-    # Запускаем бота и сервер параллельно без конфликтов
-    await asyncio.gather(
-        server.serve(),
-        dp.start_polling(bot)
-    )
+    success, res = await asyncio.to_thread(safe_deploy, url)
+    
+    if success:
+        await m.answer(f"✅ Готово! Проект `{res}` скачан.")
+    else:
+        await m.answer(f"❌ Ошибка клонирования: {res}")
+    await state.clear()
+
+@dp.message(F.text.contains("САЙТ"))
+async def toggle(m: types.Message):
+    SYSTEM_STATE["is_active"] = not SYSTEM_STATE["is_active"]
+    msg = "Сайт ВКЛЮЧЕН" if SYSTEM_STATE["is_active"] else "Сайт ВЫКЛЮЧЕН"
+    await m.answer(f"📢 {msg}", reply_markup=get_kb())
+
+# --- SERVER ---
+@app.websocket("/ws/void")
+async def ws_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    active_ws.add(websocket)
+    try:
+        while True:
+            await websocket.send_json({"active": SYSTEM_STATE["is_active"], "online": len(active_ws)})
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        active_ws.remove(websocket)
+
+async def main():
+    # Запуск сервера на 7066 и бота
+    server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=7066, loop="asyncio"))
+    print("💎 СИСТЕМА ЗАПУЩЕНА")
+    await asyncio.gather(server.serve(), dp.start_polling(bot))
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        print(f"Критическая ошибка: {e}")
+    asyncio.run(main())
