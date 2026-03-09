@@ -1,4 +1,9 @@
-aiogram==3.17.0
-fastapi==0.115.8
-uvicorn==0.34.0
-websockets==14.2
+# requirements.txt
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+sqlalchemy==2.0.23
+bcrypt==4.0.1
+python-jose[cryptography]==3.3.0
+aiofiles==23.2.1
+slowapi==0.1.8
+python-multipart==0.0.6
