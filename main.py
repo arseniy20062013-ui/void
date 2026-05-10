@@ -2,15 +2,13 @@
 import sqlite3
 import re
 import json
-import asyncio
+import os
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+import telebot
 
 TOKEN = "8786648200:AAHWlhGJO9PzNLBCEoNAxFnADZebmvPsgb0"
 
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+bot = telebot.TeleBot(TOKEN)
 
 # ==================== БАЗА ДАННЫХ ====================
 DB_PATH = "prodata.db"
@@ -19,7 +17,6 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    # Таблица пользователей (юзернейм -> данные)
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   username TEXT UNIQUE,
@@ -36,7 +33,6 @@ def init_db():
                   extra_data TEXT,
                   created_at REAL)''')
     
-    # Таблица номеров (номер -> данные)
     c.execute('''CREATE TABLE IF NOT EXISTS phones
                  (phone TEXT PRIMARY KEY,
                   operator TEXT,
@@ -48,7 +44,6 @@ def init_db():
                   range_end TEXT,
                   usage_type TEXT)''')
     
-    # Таблица логов поиска
     c.execute('''CREATE TABLE IF NOT EXISTS search_logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   query TEXT,
@@ -56,15 +51,23 @@ def init_db():
                   results TEXT,
                   timestamp REAL)''')
     
+    # Вставляем тестовые данные если их нет
+    c.execute("SELECT COUNT(*) FROM users")
+    if c.fetchone()[0] == 0:
+        test_users = [
+            ("user123", "79001234567", "МТС", "Центральный", "Москва", "Иванов Иван", "vk.com/user123", "@user123", "user123@mail.ru", "01.01.1990", "Москва, ул. Примерная, 1", "{}", datetime.now().timestamp()),
+            ("testuser", "79161234567", "Билайн", "Центральный", "Москва", "Петров Петр", "vk.com/testuser", "@testuser", "testuser@mail.ru", "02.02.1992", "Москва, ул. Тестовая, 2", "{}", datetime.now().timestamp()),
+            ("demo_user", "79261234567", "МегаФон", "Северо-Западный", "Санкт-Петербург", "Сидоров Сидор", "vk.com/demo_user", "@demo_user", "demo@mail.ru", "03.03.1995", "СПб, ул. Демо, 3", "{}", datetime.now().timestamp()),
+        ]
+        c.executemany("INSERT INTO users (username, phone, operator, region, area, full_name, vk_id, telegram_id, email, dob, address, extra_data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", test_users)
+    
     conn.commit()
     conn.close()
 
 init_db()
 
 # ==================== БАЗА DEF-КОДОВ ОПЕРАТОРОВ ====================
-# Полная база DEF-кодов РФ (первые цифры номера после 7/8)
 OPERATOR_DEF = {
-    # МТС
     "900": {"operator": "МТС", "region": "Федеральный", "area": "Россия", "mnc": "01", "mcc": "250"},
     "901": {"operator": "МТС", "region": "Федеральный", "area": "Россия", "mnc": "01", "mcc": "250"},
     "902": {"operator": "МТС", "region": "Федеральный", "area": "Россия", "mnc": "01", "mcc": "250"},
@@ -94,8 +97,6 @@ OPERATOR_DEF = {
     "987": {"operator": "МТС", "region": "Поволжский", "area": "Поволжье", "mnc": "01", "mcc": "250"},
     "988": {"operator": "МТС", "region": "Южный", "area": "Юг", "mnc": "01", "mcc": "250"},
     "989": {"operator": "МТС", "region": "Федеральный", "area": "Россия", "mnc": "01", "mcc": "250"},
-    
-    # Билайн
     "960": {"operator": "Билайн", "region": "Федеральный", "area": "Россия", "mnc": "03", "mcc": "250"},
     "961": {"operator": "Билайн", "region": "Федеральный", "area": "Россия", "mnc": "03", "mcc": "250"},
     "962": {"operator": "Билайн", "region": "Федеральный", "area": "Россия", "mnc": "03", "mcc": "250"},
@@ -106,8 +107,6 @@ OPERATOR_DEF = {
     "967": {"operator": "Билайн", "region": "Поволжский", "area": "Поволжье", "mnc": "03", "mcc": "250"},
     "968": {"operator": "Билайн", "region": "Центральный", "area": "Москва", "mnc": "03", "mcc": "250"},
     "969": {"operator": "Билайн", "region": "Федеральный", "area": "Россия", "mnc": "03", "mcc": "250"},
-    
-    # МегаФон
     "920": {"operator": "МегаФон", "region": "Федеральный", "area": "Россия", "mnc": "02", "mcc": "250"},
     "921": {"operator": "МегаФон", "region": "Северо-Западный", "area": "Санкт-Петербург", "mnc": "02", "mcc": "250"},
     "922": {"operator": "МегаФон", "region": "Уральский", "area": "Урал", "mnc": "02", "mcc": "250"},
@@ -128,8 +127,6 @@ OPERATOR_DEF = {
     "937": {"operator": "МегаФон", "region": "Поволжский", "area": "Поволжье", "mnc": "02", "mcc": "250"},
     "938": {"operator": "МегаФон", "region": "Южный", "area": "Юг", "mnc": "02", "mcc": "250"},
     "939": {"operator": "МегаФон", "region": "Федеральный", "area": "Россия", "mnc": "02", "mcc": "250"},
-    
-    # Tele2
     "950": {"operator": "Tele2", "region": "Федеральный", "area": "Россия", "mnc": "20", "mcc": "250"},
     "951": {"operator": "Tele2", "region": "Федеральный", "area": "Россия", "mnc": "20", "mcc": "250"},
     "952": {"operator": "Tele2", "region": "Федеральный", "area": "Россия", "mnc": "20", "mcc": "250"},
@@ -142,30 +139,10 @@ OPERATOR_DEF = {
     "994": {"operator": "Tele2", "region": "Дальневосточный", "area": "Дальний Восток", "mnc": "20", "mcc": "250"},
     "995": {"operator": "Tele2", "region": "Центральный", "area": "Москва", "mnc": "20", "mcc": "250"},
     "996": {"operator": "Tele2", "region": "Поволжский", "area": "Поволжье", "mnc": "20", "mcc": "250"},
-    "999": {"operator": "Tele2", "region": "Федеральный", "area": "Россия", "mnc": "20", "mcc": "250"},
-    
-    # Ростелеком
-    "941": {"operator": "Ростелеком", "region": "Федеральный", "area": "Россия", "mnc": "39", "mcc": "250"},
-    
-    # Yota
-    "999": {"operator": "Yota (Tele2)", "region": "Федеральный", "area": "Россия", "mnc": "11", "mcc": "250"},
-    
-    # Тинькофф Мобайл (MVNO на Tele2)
-    "958": {"operator": "Тинькофф Мобайл (Tele2)", "region": "Федеральный", "area": "Россия", "mnc": "20", "mcc": "250"},
+    "999": {"operator": "Tele2/Yota", "region": "Федеральный", "area": "Россия", "mnc": "20", "mcc": "250"},
 }
 
-# Расширенная база кодов регионов (ABC-коды)
-REGION_CODES = {
-    "3": {"code": "3", "region": "Центральный", "area": "Москва и МО"},
-    "4": {"code": "4", "region": "Центральный", "area": "Москва и МО"},
-    "5": {"code": "5", "region": "Северо-Западный", "area": "Санкт-Петербург и ЛО"},
-    "8": {"code": "8", "region": "Поволжский", "area": "Поволжье"},
-    "9": {"code": "9", "region": "Южный", "area": "Юг и Кавказ"},
-}
-
-# Функция нормализации номера
 def normalize_phone(phone: str) -> str:
-    """Приводит номер к формату 79XXXXXXXXX"""
     digits = re.sub(r'\D', '', phone)
     if len(digits) == 11 and digits.startswith('8'):
         digits = '7' + digits[1:]
@@ -177,27 +154,20 @@ def normalize_phone(phone: str) -> str:
         return None
     return digits
 
-# Функция получения информации о номере
 def get_phone_info(phone: str) -> dict:
-    """Возвращает полную информацию о номере"""
     phone = normalize_phone(phone)
     if not phone:
         return {"error": "Неверный формат номера"}
     
-    # Извлекаем DEF-код (первые 3 цифры после 7)
     def_code = phone[1:4]
     
     operator_info = OPERATOR_DEF.get(def_code, {
-        "operator": "Неизвестный оператор",
+        "operator": "Неизвестный оператор (возможно виртуальный)",
         "region": "Неизвестный регион",
         "area": "Неизвестная область",
         "mnc": "Н/Д",
         "mcc": "Н/Д"
     })
-    
-    # Диапазон номера
-    range_start = phone[1:7] + "0000"
-    range_end = phone[1:7] + "9999"
     
     result = {
         "phone": phone,
@@ -213,12 +183,10 @@ def get_phone_info(phone: str) -> dict:
         "country_code": "+7",
         "number_length": len(phone),
         "is_mobile": True,
-        "possible_mnp": False,  # MNP перенос номера
     }
     
     return result
 
-# Функция сохранения лога поиска
 def save_search_log(query: str, query_type: str, results: str):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -227,26 +195,37 @@ def save_search_log(query: str, query_type: str, results: str):
     conn.commit()
     conn.close()
 
-# ==================== ОБРАБОТЧИКИ БОТА ====================
+# ==================== КОМАНДЫ БОТА ====================
 
-@dp.message_handler(commands=['start'])
-async def start_cmd(message: types.Message):
-    await message.answer(
-        "🔍 Бот пробива v3.0 (Автономный)\n\n"
-        "Отправь номер телефона (любой формат) или юзернейм/ник для поиска.\n\n"
-        "Примеры:\n"
-        "• 89001234567\n"
-        "• +79161234567\n"
-        "• @username\n"
-        "• username\n\n"
-        "Бот использует встроенную базу операторов РФ.\n"
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    bot.reply_to(message,
+        "🔍 БОТ ПРОБИВА v4.0 (Автономный)\n\n"
+        "Отправь номер или ник для поиска:\n\n"
+        "📱 Номер: 89001234567\n"
+        "👤 Ник: @username\n\n"
         "Команды:\n"
-        "/search <запрос> — поиск\n"
-        "/db — статистика базы\n"
+        "/search — поиск\n"
+        "/db — статистика\n"
+        "/add — добавить данные\n"
+        "/help — помощь"
     )
 
-@dp.message_handler(commands=['db'])
-async def db_stats(message: types.Message):
+@bot.message_handler(commands=['help'])
+def help_cmd(message):
+    bot.reply_to(message,
+        "📖 ПОМОЩЬ\n\n"
+        "1. Отправь номер телефона — получишь оператора, регион, область, DEF-код\n"
+        "2. Отправь юзернейм — найдёт в базе телефон и данные\n"
+        "3. /add телефон юзернейм имя — добавить в базу\n\n"
+        "База уже содержит тестовые данные:\n"
+        "• user123\n"
+        "• testuser\n"
+        "• demo_user"
+    )
+
+@bot.message_handler(commands=['db'])
+def db_stats(message):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM phones")
@@ -256,64 +235,79 @@ async def db_stats(message: types.Message):
     c.execute("SELECT COUNT(*) FROM search_logs")
     logs_count = c.fetchone()[0]
     conn.close()
-    await message.reply(
-        f"📊 Статистика базы:\n"
+    bot.reply_to(message,
+        f"📊 СТАТИСТИКА БАЗЫ\n"
         f"• Телефонных записей: {phones_count}\n"
         f"• Пользователей: {users_count}\n"
-        f"• Логов поиска: {logs_count}"
+        f"• Логов поиска: {logs_count}\n"
+        f"• Операторов: {len(OPERATOR_DEF)}"
     )
 
-@dp.message_handler(commands=['search'])
-async def search_cmd(message: types.Message):
-    query = message.get_args().strip()
-    if not query:
-        await message.reply("Укажи запрос: /search 89001234567 или /search username")
+@bot.message_handler(commands=['search'])
+def search_cmd(message):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "Использование: /search номер_или_ник")
         return
-    await process_query(message, query)
+    query = args[1].strip()
+    process_query(message, query)
 
-@dp.message_handler()
-async def handle_message(message: types.Message):
+@bot.message_handler(commands=['add'])
+def add_cmd(message):
+    args = message.text.split(maxsplit=4)
+    if len(args) < 5:
+        bot.reply_to(message, "Использование: /add телефон юзернейм имя регион область\nПример: /add 79001234567 user1 Иванов Москва Москва")
+        return
+    
+    phone = normalize_phone(args[1])
+    if not phone:
+        bot.reply_to(message, "Неверный формат номера")
+        return
+    
+    username = args[2]
+    name = args[3]
+    region = args[4] if len(args) > 4 else ""
+    area = args[5] if len(args) > 5 else ""
+    
+    phone_info = get_phone_info(phone)
+    operator = phone_info.get("operator", "Неизвестно")
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO users (username, phone, operator, region, area, full_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (username, phone, operator, region, area, name, datetime.now().timestamp()))
+    conn.commit()
+    conn.close()
+    
+    bot.reply_to(message, f"✅ Добавлено: {username} — {phone_info['phone_formatted']} — {operator}")
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
     query = message.text.strip()
-    # Определяем тип запроса автоматически
-    if re.search(r'[\d\s\-\(\)\+]{7,}', query):
-        # Похоже на номер телефона
-        await process_query(message, query)
-    elif query.startswith('@') or re.match(r'^[a-zA-Z0-9_]{3,32}$', query):
-        # Похоже на юзернейм
-        await process_query(message, query)
-    else:
-        await message.reply("Отправь номер телефона или юзернейм для поиска.")
+    process_query(message, query)
 
-async def process_query(message: types.Message, query: str):
-    # Определяем тип запроса
+def process_query(message, query):
     is_phone = bool(re.search(r'[\d\s\-\(\)\+]{7,}', query))
     
     if is_phone:
-        # Это номер телефона
         phone_info = get_phone_info(query)
         if "error" in phone_info:
-            await message.reply(f"❌ {phone_info['error']}")
+            bot.reply_to(message, f"❌ {phone_info['error']}")
             return
         
-        # Формируем красивый ответ
         response = (
             f"📱 **РЕЗУЛЬТАТ ПОИСКА ПО НОМЕРУ**\n\n"
-            f"🔢 **Номер:** {phone_info['phone_formatted']}\n"
-            f"📡 **Оператор:** {phone_info['operator']}\n"
-            f"🌍 **Регион:** {phone_info['region']}\n"
-            f"📍 **Область:** {phone_info['area']}\n"
-            f"🏷️ **DEF-код:** {phone_info['def_code']}\n"
-            f"📊 **MCC/MNC:** {phone_info['mcc']}/{phone_info['mnc']}\n"
-            f"🇷🇺 **Страна:** {phone_info['country']}\n"
-            f"📞 **Код страны:** {phone_info['country_code']}\n"
-            f"📐 **Длина номера:** {phone_info['number_length']} цифр\n"
-            f"📶 **Тип:** Мобильный\n"
-            f"🔄 **MNP (перенос):** {'Возможен' if phone_info['possible_mnp'] else 'Нет данных'}\n"
-            f"📊 **Диапазон:** {phone_info['range']}\n\n"
-            f"🔍 **Дополнительный поиск по никнейму...**\n"
+            f"🔢 Номер: {phone_info['phone_formatted']}\n"
+            f"📡 Оператор: {phone_info['operator']}\n"
+            f"🌍 Регион: {phone_info['region']}\n"
+            f"📍 Область: {phone_info['area']}\n"
+            f"🏷️ DEF-код: {phone_info['def_code']}\n"
+            f"📊 MCC/MNC: {phone_info['mcc']}/{phone_info['mnc']}\n"
+            f"🇷🇺 Страна: {phone_info['country']} ({phone_info['country_code']})\n"
+            f"📐 Длина: {phone_info['number_length']} цифр\n"
+            f"📊 Диапазон: {phone_info['range']}\n"
         )
         
-        # Ищем связанные данные в базе
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT * FROM users WHERE phone LIKE ?", (f"%{phone_info['phone']}%",))
@@ -322,21 +316,20 @@ async def process_query(message: types.Message, query: str):
         
         if user_data:
             response += (
-                f"\n👤 **Найдены связанные данные:**\n"
-                f"• Юзернейм: {user_data[1] if user_data[1] else 'Н/Д'}\n"
-                f"• Имя: {user_data[5] if user_data[5] else 'Н/Д'}\n"
-                f"• Telegram: {user_data[7] if user_data[7] else 'Н/Д'}\n"
-                f"• Email: {user_data[8] if user_data[8] else 'Н/Д'}\n"
+                f"\n👤 **СВЯЗАННЫЕ ДАННЫЕ:**\n"
+                f"• Юзернейм: {user_data[1] or 'Н/Д'}\n"
+                f"• Имя: {user_data[5] or 'Н/Д'}\n"
+                f"• Telegram: {user_data[7] or 'Н/Д'}\n"
+                f"• Email: {user_data[8] or 'Н/Д'}\n"
+                f"• Адрес: {user_data[11] or 'Н/Д'}\n"
             )
         
         save_search_log(query, "phone", json.dumps(phone_info, ensure_ascii=False))
-        await message.reply(response)
+        bot.reply_to(message, response)
         
     else:
-        # Это юзернейм/ник
         username = query.replace('@', '').strip()
         
-        # Ищем в базе
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT * FROM users WHERE username LIKE ? OR telegram_id LIKE ? OR vk_id LIKE ?", 
@@ -347,41 +340,39 @@ async def process_query(message: types.Message, query: str):
         if user_data:
             response = (
                 f"👤 **НАЙДЕН ПОЛЬЗОВАТЕЛЬ**\n\n"
-                f"🔤 **Юзернейм:** {user_data[1] or 'Н/Д'}\n"
-                f"📱 **Телефон:** {user_data[2] or 'Н/Д'}\n"
-                f"📡 **Оператор:** {user_data[3] or 'Н/Д'}\n"
-                f"🌍 **Регион:** {user_data[4] or 'Н/Д'}\n"
-                f"📍 **Область:** {user_data[5] or 'Н/Д'}\n"
-                f"👨 **Имя:** {user_data[6] or 'Н/Д'}\n"
-                f"🔗 **VK:** {user_data[7] or 'Н/Д'}\n"
-                f"📧 **Telegram:** {user_data[8] or 'Н/Д'}\n"
-                f"📮 **Email:** {user_data[9] or 'Н/Д'}\n"
-                f"🎂 **Дата рождения:** {user_data[10] or 'Н/Д'}\n"
-                f"🏠 **Адрес:** {user_data[11] or 'Н/Д'}\n"
+                f"🔤 Юзернейм: {user_data[1] or 'Н/Д'}\n"
+                f"📱 Телефон: {user_data[2] or 'Н/Д'}\n"
+                f"📡 Оператор: {user_data[3] or 'Н/Д'}\n"
+                f"🌍 Регион: {user_data[4] or 'Н/Д'}\n"
+                f"📍 Область: {user_data[5] or 'Н/Д'}\n"
+                f"👨 Имя: {user_data[6] or 'Н/Д'}\n"
+                f"🔗 VK: {user_data[7] or 'Н/Д'}\n"
+                f"📧 Telegram: {user_data[8] or 'Н/Д'}\n"
+                f"📮 Email: {user_data[9] or 'Н/Д'}\n"
+                f"🎂 Дата рождения: {user_data[10] or 'Н/Д'}\n"
+                f"🏠 Адрес: {user_data[11] or 'Н/Д'}\n"
             )
-            save_search_log(query, "username", json.dumps(user_data, ensure_ascii=False))
-            await message.reply(response)
+            save_search_log(query, "username", "found")
+            bot.reply_to(message, response)
         else:
-            # Нет в базе, даём общую инфу
             response = (
-                f"🔍 **ПОИСК ПО НИКУ: @{username}**\n\n"
-                f"❌ В локальной базе данных не найдено.\n\n"
-                f"📝 **Возможные платформы для поиска:**\n"
-                f"• Telegram: t.me/{username}\n"
-                f"• VK: vk.com/{username}\n"
-                f"• GitHub: github.com/{username}\n"
-                f"• Twitter/X: x.com/{username}\n"
-                f"• Instagram: instagram.com/{username}\n\n"
-                f"💡 Если знаешь номер, отправь его для получения данных об операторе и регионе."
+                f"🔍 **ПОИСК: @{username}**\n\n"
+                f"❌ В базе не найдено.\n\n"
+                f"📝 Возможные платформы:\n"
+                f"• t.me/{username}\n"
+                f"• vk.com/{username}\n"
+                f"• github.com/{username}\n\n"
+                f"💡 Отправь номер телефона для получения данных оператора.\n"
+                f"💡 Используй /add чтобы добавить данные."
             )
-            save_search_log(query, "username", "Not found")
-            await message.reply(response)
+            save_search_log(query, "username", "not_found")
+            bot.reply_to(message, response)
 
 if __name__ == '__main__':
     print("=" * 50)
     print("БОТ ЗАПУЩЕН")
     print(f"Токен: {TOKEN[:20]}...")
-    print("База данных: prodata.db")
-    print("Операторов в базе: ", len(OPERATOR_DEF))
+    print(f"База: {DB_PATH}")
+    print(f"Операторов: {len(OPERATOR_DEF)}")
     print("=" * 50)
-    executor.start_polling(dp, skip_updates=True)
+    bot.polling(none_stop=True)
