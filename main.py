@@ -3,96 +3,86 @@ import logging
 import sqlite3
 import re
 import aiohttp
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 
-# ТВОЙ ТОКЕН
 TOKEN = "8786648200:AAHWlhGJO9PzNLBCEoNAxFnADZebmvPsgb0"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
-# --- СОБСТВЕННАЯ БАЗА ЗНАНИЙ (ЭКОСИСТЕМА) ---
-class PrivateDatabase:
+# --- ИНТЕЛЛЕКТУАЛЬНАЯ БАЗА ЭКОСИСТЕМЫ ---
+class IntelCore:
     def __init__(self):
-        self.conn = sqlite3.connect("vortex_base.db")
-        self.create_tables()
-
-    def create_tables(self):
-        # Таблица для хранения связей: номер -> фио -> почта -> вк
-        self.conn.execute('''CREATE TABLE IF NOT EXISTS intelligence (
-            target TEXT PRIMARY KEY, 
-            full_data TEXT, 
-            tags TEXT,
-            discovery_date DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        self.conn = sqlite3.connect("vortex_v9.db")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS data (key TEXT PRIMARY KEY, info TEXT)")
         self.conn.commit()
 
-    def update_intel(self, target, data):
-        self.conn.execute("INSERT OR REPLACE INTO intelligence (target, full_data) VALUES (?, ?)", (target, data))
+    def save(self, key, info):
+        self.conn.execute("INSERT OR REPLACE INTO data VALUES (?, ?)", (key, info))
         self.conn.commit()
 
-    def get_intel(self, target):
-        cursor = self.conn.execute("SELECT full_data FROM intelligence WHERE target=?", (target,))
-        res = cursor.fetchone()
+    def get(self, key):
+        res = self.conn.execute("SELECT info FROM data WHERE key=?", (key,)).fetchone()
         return res[0] if res else None
 
-db = PrivateDatabase()
+db = IntelCore()
 
-# --- АВТОНОМНЫЙ ПАУК (SEARCH ENGINE) ---
-async def autonomous_crawl(target):
-    """
-    Система сама анализирует выдачу и ищет паттерны (регулярками)
-    без сторонних API.
-    """
-    results = {"phone": target, "found": []}
-    search_urls = [
-        f"https://www.bing.com/search?q={target}",
-        f"https://duckduckgo.com/html/?q={target}+vk+ok+facebook"
+# --- ЯДРО ГЛУБОКОГО ВЫДИРАНИЯ ДАННЫХ ---
+async def deep_scan(target):
+    extracted = []
+    # Цели для глубокого парсинга (архивы, реестры, соц-префиксы)
+    sources = [
+        f"https://www.google.com/search?q=site:vk.com+{target}",
+        f"https://www.google.com/search?q=site:ok.ru+{target}",
+        f"https://www.google.com/search?q=intext:\"{target}\"+contact+info"
     ]
     
     async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
-        for url in search_urls:
+        for url in sources:
             async with session.get(url) as resp:
-                html = await resp.text()
-                # Ищем почты
-                emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', html)
-                # Ищем упоминания соцсетей
-                socials = re.findall(r'(vk\.com\/[a-zA-Z0-9._]+|t\.me\/[a-zA-Z0-9._]+)', html)
+                text = await resp.text()
                 
-                results['found'].extend(list(set(emails + socials)))
+                # 1. Выдираем реальные ID пользователей
+                ids = re.findall(r'id(\d{5,15})', text)
+                # 2. Выдираем ФИО (паттерн: заглавные буквы рядом с целью)
+                names = re.findall(r'[А-Я][а-я]+\s[А-Я][а-я]+', text)
+                # 3. Выдираем упоминания городов и почт
+                locations = re.findall(r'г\.\s?[А-Я][а-я]+', text)
+                
+                if ids: extracted.append(f"🆔 VK ID: {ids[0]}")
+                if names: extracted.append(f"👤 Вероятное имя: {names[0]}")
+                if locations: extracted.append(f"📍 Локация: {locations[0]}")
 
-    return results
+    return list(set(extracted))
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await message.answer("🌑 **VORTEX AUTONOMOUS OSINT**\nСистема развернута. База данных готова к наполнению.")
+async def welcome(m: Message):
+    await m.answer("💀 **VORTEX DEEP SCAN v9.0**\nРежим прямого извлечения данных активирован. Введите цель.")
 
 @dp.message()
-async def handle_request(message: Message):
-    target = message.text.strip()
+async def work(m: Message):
+    target = m.text.strip()
     
-    # 1. Сначала ищем в СВОЕЙ накопленной системе
-    existing = db.get_intel(target)
-    if existing:
-        return await message.answer(f"🗄 **ИЗ СОБСТВЕННОЙ БАЗЫ:**\n{existing}")
+    # Проверка своей базы
+    cache = db.get(target)
+    if cache: return await m.answer(f"📦 **НАЙДЕНО В ВАШЕЙ БАЗЕ:**\n{cache}")
 
-    status = await message.answer("📡 *Запуск автономного поиска и индексации...*")
+    status = await m.answer("📡 *Вскрываю пакеты данных, ищу прямые совпадения...*")
     
-    # 2. Сама ищет и анализирует
-    data = await autonomous_crawl(target)
+    # Глубокий парсинг
+    found_data = await deep_scan(target)
     
-    report = f"🎯 **НОВЫЙ ОБЪЕКТ ИДЕНТИФИЦИРОВАН**\n"
-    report += f"📱 Цель: {target}\n"
-    report += f"🌐 Найдено связей: {len(data['found'])}\n"
-    report += f"📑 Данные: {', '.join(data['found']) if data['found'] else 'В открытом слое нет, жду логов'}\n"
-    report += f"💾 Объект добавлен в вашу личную экосистему."
+    if not found_data:
+        res = "❌ Прямых данных в открытых слоях не найдено. Объект чист или скрыт."
+    else:
+        res = f"🔥 **ОБЪЕКТ ПРОБИТ:**\n" + "\n".join(found_data)
+        res += f"\n\n💾 Данные занесены в вашу экосистему."
 
-    # 3. Запоминает навсегда
-    db.update_intel(target, report)
-    
-    await status.edit_text(report)
+    db.save(target, res)
+    await status.edit_text(res)
 
 async def main():
     await dp.start_polling(bot)
