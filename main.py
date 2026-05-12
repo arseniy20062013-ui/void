@@ -1,368 +1,295 @@
-import asyncio
-import logging
-import re
-import time
-import urllib.request
-import urllib.parse
-import ssl
-import random
+import asyncio, logging, re, json, time, socket, ssl, urllib.request, urllib.parse
 from datetime import datetime
+from typing import Optional, Dict, List, Tuple
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.enums import ParseMode
 
 TOKEN = "8786648200:AAHWlhGJO9PzNLBCEoNAxFnADZebmvPsgb0"
-
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
+sessions: Dict[int, Dict] = {}
 
-sessions = {}
+# ==================== ТЕЛЕФОН ====================
+async def lookup_phone(phone: str) -> Optional[Dict]:
+    clean = re.sub(r'[^\d]', '', phone)
+    if len(clean) == 11 and (clean.startswith('7') or clean.startswith('8')):
+        clean = '7' + clean[1:] if clean.startswith('8') else clean
+    elif len(clean) == 10:
+        clean = '7' + clean
+    else:
+        return None
+    try:
+        url = f"https://htmlweb.ru/geo/api.php?json&telcod={clean}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode('utf-8'))
+            return {
+                'country': data.get('country', {}).get('name', ''),
+                'region': data.get('region', {}).get('name', ''),
+                'operator': data.get('0', {}).get('oper', ''),
+            }
+    except Exception as e:
+        logging.warning(f"Phone error: {e}")
+    return None
 
-class Searcher:
-    def __init__(self):
-        self.ctx = ssl.create_default_context()
-        self.ctx.check_hostname = False
-        self.ctx.verify_mode = ssl.CERT_NONE
-        
-        self.agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
-            'Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0',
-            'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
-            'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.3 Mobile Safari/537.36',
-        ]
+# ==================== EMAIL: WHOIS домена + MX ====================
+def whois_domain(domain: str) -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(10)
+        s.connect(("whois.iana.org", 43))
+        s.send(f"{domain}\r\n".encode())
+        resp = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk: break
+            resp += chunk
+        s.close()
+        text = resp.decode('utf-8', errors='ignore')
+        refer = re.search(r'whois:\s*(\S+)', text)
+        if refer:
+            whois_server = refer.group(1)
+            s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s2.settimeout(10)
+            s2.connect((whois_server, 43))
+            s2.send(f"{domain}\r\n".encode())
+            resp2 = b""
+            while True:
+                chunk = s2.recv(4096)
+                if not chunk: break
+                resp2 += chunk
+            s2.close()
+            return resp2.decode('utf-8', errors='ignore')[:500]
+        else:
+            return text[:500]
+    except:
+        return ""
 
-
-        self.engines = [
-            {'url': 'https://html.duckduckgo.com/html/?q={query}&kl=ru-ru', 'name': 'DuckDuckGo'},
-            {'url': 'https://search.yahoo.com/search?p={query}&n=30', 'name': 'Yahoo'},
-            {'url': 'https://www.bing.com/search?q={query}&count=30&setlang=ru', 'name': 'Bing'},
-            {'url': 'https://yandex.ru/search/?text={query}&numdoc=30&lr=2', 'name': 'Яндекс'},
-            {'url': 'https://www.google.com/search?q={query}&num=30&hl=ru&gl=ru', 'name': 'Google'},
-            {'url': 'https://search.aol.com/aol/search?q={query}&count=30', 'name': 'AOL'},
-            {'url': 'https://www.ask.com/web?q={query}', 'name': 'Ask'},
-            {'url': 'https://search.lycos.com/web/?q={query}', 'name': 'Lycos'},
-            {'url': 'https://startpage.com/do/dsearch?query={query}&language=ru', 'name': 'Startpage'},
-            {'url': 'https://search.brave.com/search?q={query}&source=web', 'name': 'Brave'},
-            {'url': 'https://www.ecosia.org/search?q={query}', 'name': 'Ecosia'},
-            {'url': 'https://www.dogpile.com/serp?q={query}', 'name': 'Dogpile'},
-            {'url': 'https://searx.be/search?q={query}&language=ru', 'name': 'SearX'},
-            {'url': 'https://search.qwant.com/?q={query}&language=ru', 'name': 'Qwant'},
-            {'url': 'https://www.entireweb.com/search?q={query}', 'name': 'Entireweb'},
-        ]
-
-    def _get_headers(self):
-        return {
-            'User-Agent': random.choice(self.agents),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.5,en;q=0.3',
-            'Accept-Encoding': 'identity',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'Referer': 'https://www.google.com/',
-        }
-
-    def _fetch(self, url):
+def check_mx(domain: str) -> List[str]:
+    try:
+        import smtplib
+        from email.utils import parseaddr
+        # Простая проверка MX записи через socket
+        import dns.resolver
+        answers = dns.resolver.resolve(domain, 'MX')
+        return [str(r.exchange) for r in answers]
+    except:
         try:
-            req = urllib.request.Request(url, headers=self._get_headers())
-            with urllib.request.urlopen(req, timeout=20, context=self.ctx) as resp:
-                return resp.read().decode('utf-8', errors='ignore')
+            # fallback: через smtplib (не всегда работает)
+            import smtplib
+            mx = smtplib.SMTP()
+            mx.connect(domain)
+            mx.quit()
+            return ["SMTP доступен"]
         except:
-            return ""
+            return []
 
-    def _extract_data(self, html, target):
-        found = {
-            'names': [],
-            'nicks': [],
-            'phones': [],
-            'emails': [],
-            'addresses': [],
-            'urls': [],
-            'snippets': []
-        }
+# ==================== ПОИСК EMAIL В DUCKDUCKGO (ЧИСТЫЕ СНИППЕТЫ) ====================
+async def search_email_snippets(email: str) -> List[str]:
+    snippets = []
+    # Экранируем email для URL
+    query = urllib.parse.quote(f'"{email}"')
+    url = f"https://html.duckduckgo.com/html/?q={query}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode('utf-8', errors='ignore')
+            # Ищем блоки результатов: <a class="result__snippet"...>текст</a>
+            # В DuckDuckGo HTML сниппеты лежат в <a class="result__snippet">
+            raw_snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+            for s in raw_snippets:
+                clean = re.sub(r'<[^>]+>', '', s).strip()
+                clean = re.sub(r'\s+', ' ', clean)
+                if len(clean) > 20 and email.lower() in clean.lower():
+                    snippets.append(clean)
+            return snippets[:5]
+    except Exception as e:
+        logging.warning(f"Email search error: {e}")
+    return snippets
 
+# ==================== ПРОВЕРКА ПРОФИЛЕЙ ПО НИКУ ====================
+PLATFORMS = [
+    ("VK", "https://vk.com/{}"),
+    ("Facebook", "https://www.facebook.com/{}"),
+    ("Instagram", "https://www.instagram.com/{}/"),
+    ("Twitter/X", "https://twitter.com/{}"),
+    ("GitHub", "https://github.com/{}"),
+    ("YouTube", "https://www.youtube.com/@{}"),
+    ("TikTok", "https://www.tiktok.com/@{}"),
+    ("Reddit", "https://www.reddit.com/user/{}"),
+    ("Habr", "https://habr.com/ru/users/{}/"),
+    ("LinkedIn", "https://www.linkedin.com/in/{}"),
+    ("Steam", "https://steamcommunity.com/id/{}"),
+    ("Telegram", "https://t.me/{}"),
+    ("OK.ru", "https://ok.ru/{}"),
+]
 
-        clean = re.sub(r'<[^>]+>', ' ', html)
-        clean = re.sub(r'&[a-z]+;', ' ', clean)
-        clean = re.sub(r'\s+', ' ', clean)
+async def check_username(username: str) -> List[Tuple[str, str]]:
+    found = []
+    username = username.lstrip('@')
+    if not username: return found
+    for platform, url_template in PLATFORMS:
+        url = url_template.format(username)
+        try:
+            req = urllib.request.Request(url, method='HEAD')
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    found.append((platform, url))
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 200):
+                found.append((platform, url))
+        except:
+            continue
+        await asyncio.sleep(0.1)
+    return found
 
+# ==================== ПОИСК ИМЕНИ В DUCKDUCKGO ====================
+async def search_name(name: str) -> Optional[str]:
+    try:
+        url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(name)}&format=json&no_html=1&skip_disambig=1"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            abstract = data.get('AbstractText', '')
+            if abstract:
+                return abstract
+    except:
+        pass
+    return None
 
-        names = re.findall(r'[А-ЯЁ][а-яё]+\s[А-ЯЁ][а-яё]+(?:\s[А-ЯЁ][а-яё]+)?', clean)
-        for n in names:
-            if len(n) > 6 and n not in found['names']:
-                found['names'].append(n.strip())
+# ==================== ГЛАВНЫЙ ПОИСК ====================
+async def comprehensive_search(target: str, status_callback=None) -> Dict:
+    report = {'target': target}
+    target = target.strip()
 
+    # Телефон?
+    if re.match(r'^[\+7|8]?\d{10,11}$', re.sub(r'[\s\-\(\)]', '', target)):
+        report['type'] = 'phone'
+        if status_callback: await status_callback("Определение оператора...")
+        report['phone_info'] = await lookup_phone(target)
 
-        nicks = re.findall(r'(?:@|ник:?\s*|nick:?\s*|username:?\s*|login:?\s*)([a-zA-Z0-9_\.]{3,30})', clean.lower())
-        found['nicks'].extend(nicks[:10])
+    # Email?
+    elif re.match(r'[^@]+@[^@]+\.[^@]+', target):
+        report['type'] = 'email'
+        domain = target.split('@')[-1]
+        if status_callback: await status_callback("WHOIS домена...")
+        report['whois'] = whois_domain(domain)
+        if status_callback: await status_callback("Поиск сниппетов в интернете...")
+        report['snippets'] = await search_email_snippets(target)
 
+    # Домен?
+    elif re.match(r'^[a-zA-Z0-9\-\.]+\.[a-zA-Z]{2,}$', target):
+        report['type'] = 'domain'
+        if status_callback: await status_callback("WHOIS запрос...")
+        report['whois'] = whois_domain(target)
 
-        phones = re.findall(
-            r'(?:\+7|8|7)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}',
-            clean
-        )
+    # Иначе ник или имя
+    else:
+        report['type'] = 'username_name'
+        if status_callback: await status_callback("Поиск профилей...")
+        report['profiles'] = await check_username(target)
+        if status_callback: await status_callback("Поиск упоминаний...")
+        report['abstract'] = await search_name(target)
 
+    return report
 
-        email_pattern = r'[a-zA-Z0-9][a-zA-Z0-9._%+\-]*@[a-zA-Z0-9][a-zA-Z0-9.\-]*\.[a-zA-Z]{2,}'
-        emails = re.findall(email_pattern, clean)
+# ==================== ФОРМАТ ОТЧЁТА ====================
+def format_report(report: Dict) -> str:
+    lines = [
+        f"<b>ОТЧЁТ ПОИСКА</b>\n"
+        f"Цель: {report['target']}\n"
+        f"Время: {datetime.now():%d.%m.%Y %H:%M:%S}\n"
+        f"Тип: {report.get('type', 'неизвестно')}\n"
+        f"<b>━━━━━━━━━━━━━━━━━━</b>\n"
+    ]
+    if 'phone_info' in report:
+        pi = report['phone_info']
+        if pi:
+            lines.append(f"<b>Телефон:</b>\n• Оператор: {pi['operator']}\n• Регион: {pi['region']}\n• Страна: {pi['country']}\n")
+        else:
+            lines.append("Телефон: не удалось определить.\n")
 
+    if 'whois' in report and report['whois']:
+        lines.append(f"<b>WHOIS домена:</b>\n<pre>{report['whois']}</pre>\n")
 
-        addr_patterns = [
-            r'(?:ул\.|улица|пр\.|проспект|пер\.|переулок|пл\.|площадь|б-р|бульвар|наб\.|набережная)[\s\w\-\.\,]+(?:д\.|дом|к\.|корп\.|кв\.|квартира)?\s*\d+[а-я]?',
-            r'(?:г\.|город)\s*[А-ЯЁ][а-яё\-]+',
-            r'[А-ЯЁ][а-яё\-]+\s(?:область|край|район)',
-        ]
-        for pat in addr_patterns:
-            addresses = re.findall(pat, clean)
-            found['addresses'].extend(addresses)
-
-
-        urls = re.findall(
-            r'https?://(?!google\.|yandex\.|bing\.|yahoo\.|duckduckgo\.|aol\.|ask\.|lycos\.|startpage\.|brave\.|ecosia\.|dogpile\.|searx\.|qwant\.|entireweb\.)[^\s<>"\']+',
-            clean
-        )
-
-
-        snippets = re.split(r'[.!?]\s+', clean)
-        for s in snippets:
-            s = s.strip()
-            if len(s) > 30 and len(s) < 300 and target.lower() in s.lower():
-                found['snippets'].append(s)
-
-        for key in found:
-            found[key] = list(set(found[key]))[:15]
-
-        return found
-
-    async def search(self, target, status_callback=None):
-        all_data = {
-            'names': [],
-            'nicks': [],
-            'phones': [],
-            'emails': [],
-            'addresses': [],
-            'urls': [],
-            'snippets': [],
-            'sources': []
-        }
-
-        queries = [
-            f'"{target}"',
-            f'{target} контакты',
-            f'{target} адрес',
-            f'{target} email',
-            f'{target} соцсети',
-            f'{target} vk',
-            f'{target} telegram',
-            f'{target} facebook',
-            f'{target} instagram',
-            f'{target} github',
-            f'{target} linkedin',
-            f'site:vk.com {target}',
-            f'site:facebook.com {target}',
-            f'site:instagram.com {target}',
-            f'site:t.me {target}',
-            f'site:github.com {target}',
-            f'site:habr.com {target}',
-            f'site:linkedin.com {target}',
-            f'site:twitter.com {target}',
-            f'site:ok.ru {target}',
-            f'site:avito.ru {target}',
-            f'site:cian.ru {target}',
-            f'{target} телефон',
-            f'{target} +7',
-            f'{target} город',
-            f'{target} работа',
-            f'{target} резюме',
-            f'{target} отзывы',
-            f'{target} слив',
-            f'{target} утечка',
-        ]
-
-        total_q = len(queries)
-        engines_to_use = self.engines[:8]
-
-        for i, q in enumerate(queries):
-            if status_callback and i % 2 == 0:
-                pct = int((i / total_q) * 100)
-                await status_callback(f"Обработано запросов: {i}/{total_q} ({pct}%)")
-
-            engine = random.choice(engines_to_use)
-            url = engine['url'].format(query=urllib.parse.quote(q))
-            html = self._fetch(url)
-
-            if html:
-                data = self._extract_data(html, target)
-                for key in all_data:
-                    if key != 'sources':
-                        all_data[key].extend(data.get(key, []))
-                all_data['sources'].append(engine['name'])
-
-
-            await asyncio.sleep(random.uniform(1.5, 3.5))
-
-
-        for key in all_data:
-            if isinstance(all_data[key], list):
-                all_data[key] = list(set(all_data[key]))[:20]
-
-        all_data['sources'] = list(set(all_data['sources']))
-        return all_data
-
-searcher = Searcher()
-
-def format_report(target, data):
-    lines = []
-    lines.append("ОТЧЁТ ПОИСКА\n")
-    lines.append(f"Цель: {target}")
-    lines.append(f"Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
-    lines.append(f"Источники: {', '.join(data.get('sources', []))}")
-    lines.append("━━━━━━━━━━━━━━━━━━\n")
-
-    if data.get('names'):
-        lines.append("ИМЕНА:")
-        for n in data['names'][:10]:
-            lines.append(f"  • {n}")
+    if 'snippets' in report and report['snippets']:
+        lines.append("<b>Упоминания email в интернете:</b>")
+        for s in report['snippets']:
+            lines.append(f"• {s}")
         lines.append("")
 
-    if data.get('nicks'):
-        lines.append("НИКИ:")
-        for n in data['nicks'][:10]:
-            lines.append(f"  • {n}")
-        lines.append("")
+    if 'profiles' in report:
+        lines.append("<b>Найденные профили:</b>")
+        for platform, url in report['profiles']:
+            lines.append(f"• <a href='{url}'>{platform}</a>")
 
-    if data.get('phones'):
-        lines.append("ТЕЛЕФОНЫ:")
-        for p in data['phones'][:10]:
-            lines.append(f"  • {p}")
-        lines.append("")
+    if 'abstract' in report and report['abstract']:
+        lines.append(f"<b>Краткая информация:</b>\n{report['abstract']}")
 
-    if data.get('emails'):
-        lines.append("EMAIL:")
-        for e in data['emails'][:10]:
-            lines.append(f"  • {e}")
-        lines.append("")
-
-    if data.get('addresses'):
-        lines.append("АДРЕСА:")
-        for a in data['addresses'][:10]:
-            lines.append(f"  • {a}")
-        lines.append("")
-
-    if data.get('urls'):
-        lines.append("ССЫЛКИ:")
-        for u in data['urls'][:10]:
-            lines.append(f"  • {u}")
-        lines.append("")
-
-    if data.get('snippets'):
-        lines.append("НАЙДЕННЫЕ ФРАГМЕНТЫ:")
-        for s in data['snippets'][:8]:
-            lines.append(f"  • {s[:200]}...")
-        lines.append("")
-
-    if not any([data.get('names'), data.get('nicks'), data.get('phones'), data.get('emails'), data.get('addresses'), data.get('urls')]):
-        lines.append("В открытых источниках ничего не найдено.")
-        lines.append("Возможно, данные скрыты или цель использует защиту.")
-
-    lines.append("\n━━━━━━━━━━━━━━━━━━")
-    lines.append("Поиск завершён. Данные из открытых источников.")
-
+    lines.append("\n<b>━━━━━━━━━━━━━━━━━━</b>\nДанные из открытых источников.")
     return '\n'.join(lines)
 
+# ==================== КЛАВИАТУРА ====================
 def consent_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ДА, ИСКАТЬ", callback_data="ok")],
-        [InlineKeyboardButton(text="НЕТ, ОТМЕНА", callback_data="no")],
+        [InlineKeyboardButton(text="✅ ДА, ПРОДОЛЖИТЬ", callback_data="ok")],
+        [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="no")]
     ])
 
 @dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
-        "ПОИСКОВЫЙ БОТ\n\n"
-        "Отправьте ФИО, телефон, email или никнейм.\n"
-        "Поиск по 15 поисковикам, автономно.\n\n"
-        "Перед поиском запрашивается согласие.\n"
-        "Данные только из открытых источников.",
+        "🔍 <b>OSINT БОТ</b>\n\n"
+        "Отправьте телефон, email, никнейм или домен.\n"
+        "Без API-ключей, только публичные данные.\n"
+        "Перед поиском запрашивается согласие.",
         parse_mode=ParseMode.HTML
     )
 
 @dp.message()
-async def handle(msg: Message):
+async def handle_input(msg: Message):
     target = msg.text.strip()
-    if len(target) < 2:
-        await msg.answer("Слишком коротко.")
-        return
-
-    sessions[msg.from_user.id] = {
-        'target': target,
-        'time': time.time()
-    }
-
+    if len(target) < 2: return
+    sessions[msg.from_user.id] = {'target': target, 'time': time.time()}
     await msg.answer(
-        f"Цель: <b>{target}</b>\n\n"
-        f"Поиск по 15 системам (Google, Yandex, Bing, DuckDuckGo, Yahoo, AOL, Ask, Lycos, Startpage, Brave, Ecosia, Dogpile, SearX, Qwant, Entireweb).\n"
-        f"Обрабатывается 30 поисковых запросов.\n"
-        f"Ориентировочное время: 60-90 секунд.\n\n"
-        f"Продолжить?",
+        f"🎯 <b>Цель:</b> {target}\n\n"
+        "Начинаем поиск. Подтвердите согласие.",
         reply_markup=consent_kb(),
         parse_mode=ParseMode.HTML
     )
 
 @dp.callback_query(F.data == "ok")
-async def ok_cb(cb: CallbackQuery):
+async def process_yes(cb: CallbackQuery):
     uid = cb.from_user.id
     if uid not in sessions:
-        await cb.answer("Сессия истекла. Отправьте запрос заново.", show_alert=True)
+        await cb.answer("Сессия истекла.", show_alert=True)
         return
-
     target = sessions[uid]['target']
-
-    await cb.message.edit_text(
-        f"ПОИСК ЗАПУЩЕН\n\nЦель: <b>{target}</b>\n\n"
-        f"Выполняется поиск...\n"
-        f"Пожалуйста, подождите.",
-        parse_mode=ParseMode.HTML
-    )
+    await cb.message.edit_text(f"🔎 Идёт поиск: <b>{target}</b>\nОжидайте...", parse_mode=ParseMode.HTML)
     await cb.answer()
+    status_msg = await cb.message.answer("⏳ Старт...")
 
-    status_msg = await cb.message.answer("0%")
-    last_update = [0]
+    async def update(text):
+        try: await status_msg.edit_text(f"⏳ {text}")
+        except: pass
 
-    async def update_status(text):
-        now = int(time.time())
-        if now - last_update[0] >= 2:
-            last_update[0] = now
-            try:
-                await status_msg.edit_text(f"Статус: {text}")
-            except:
-                pass
-
-    data = await searcher.search(target, status_callback=update_status)
-
+    report = await comprehensive_search(target, status_callback=update)
+    await status_msg.delete()
+    formatted = format_report(report)
     try:
-        await status_msg.delete()
+        await cb.message.answer(formatted, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except:
-        pass
-
-    report = format_report(target, data)
-
-    try:
-        await cb.message.answer(report, parse_mode=ParseMode.HTML)
-    except:
-        parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
-        for p in parts:
-            await cb.message.answer(p, parse_mode=ParseMode.HTML)
+        for part in [formatted[i:i+4000] for i in range(0, len(formatted), 4000)]:
+            await cb.message.answer(part, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 @dp.callback_query(F.data == "no")
-async def no_cb(cb: CallbackQuery):
-    uid = cb.from_user.id
-    if uid in sessions:
-        del sessions[uid]
+async def process_no(cb: CallbackQuery):
+    sessions.pop(cb.from_user.id, None)
     await cb.message.edit_text("Поиск отменён.")
     await cb.answer("Отмена")
 
@@ -371,5 +298,5 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    print("Бот запущен.")
+    print("Бот без HIBP запущен.")
     asyncio.run(main())
