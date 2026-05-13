@@ -2,7 +2,6 @@ import asyncio
 import aiohttp
 import re
 import random
-import time
 from urllib.parse import quote
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -38,7 +37,7 @@ dp = Dispatcher()
 user_sessions = {}
 
 # ====== КЛАССИФИКАЦИЯ ВВОДА ======
-def classify_input(text: str) -> dict:
+def classify_input(text: str):
     text = text.strip()
     if re.match(r'^@[a-zA-Z0-9_]{5,}$', text):
         return {"type": "username", "value": text.replace("@", "")}
@@ -47,88 +46,191 @@ def classify_input(text: str) -> dict:
         return {"type": "phone", "value": digits[-10:]}
     return {"type": "unknown", "value": text}
 
-# ====== УЛУЧШЕННЫЙ ФИЛЬТР ИМЁН ======
-STOP_WORDS = {
-    "google", "copyright", "search", "facebook", "twitter", "instagram",
-    "yandex", "яндекс", "одноклассники", "вконтакте", "telegram",
-    "whatsapp", "viber", "skype", "snapchat", "tiktok", "linkedin",
-    "pinterest", "reddit", "tumblr", "flickr", "youtube", "ютуб",
-    "download", "upload", "share", "send", "submit", "login", "logout",
-    "страница", "помощь", "поддержка", "справка", "закладки", "раздел",
-    "новости", "лента", "главная", "поиск", "вход", "регистрация",
-    "профиль", "настройки", "безопасность", "конфиденциальность",
-    "реклама", "вакансии", "услуги", "товары", "компания", "организация",
-    "сообщение", "комментарий", "публикация", "видео", "фото", "запись",
-    "музыка", "история", "география", "математика", "физика", "химия",
-    "биология", "литература", "экономика", "политика", "спорт",
-    "культура", "наука", "технологии", "undefined", "null", "none", "loading",
-    "экваториальная", "гвинея", "северная", "корея", "новая", "зеландия",
-    "объединенные", "арабские", "эмираты", "республика", "федерация",
-    "королевство", "область", "край", "округ", "америка", "европа",
-    "африка", "азия", "австралия", "антарктида", "нидерланды",
-    "французская", "гвиана", "полинезия", "саудовская", "аравия",
-    "южный", "судан", "карибские", "если", "вам", "для", "что", "как",
-    "это", "или", "также", "только", "ещё", "уже", "был", "была", "были",
-    "весь", "вся", "все", "кто", "кого", "кому", "кем", "что", "чего",
-    "чему", "чем", "где", "куда", "откуда", "когда", "зачем", "почему",
-    "сколько", "какой", "который", "свой", "своя", "свои", "наш", "наша",
-    "наши", "мой", "моя", "мои", "твой", "твоя", "твои", "его", "её", "их",
-    "этот", "эта", "эти", "тот", "та", "те"
-}
+# ====== ФУНКЦИИ ПАРСИНГА ======
+def extract_phones(html):
+    if not html: return []
+    raw = re.findall(r'(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', html)
+    clean = []
+    for num in raw:
+        digits = re.sub(r'\D', '', num)
+        if len(digits) == 11 and digits[0] in '78':
+            clean.append(digits[-10:])
+    return list(set(clean))
 
-def is_valid_name(name: str) -> bool:
-    parts = name.split()
-    if len(parts) < 2 or len(parts) > 3:
-        return False
-    if not all(re.match(r'^[А-ЯЁA-Z]', p) for p in parts):
-        return False
-    lower_name = name.lower()
-    for p in parts:
-        if p.lower() in STOP_WORDS:
-            return False
-    return True
+def extract_emails(html):
+    if not html: return []
+    return list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', html)))[:5]
 
-def extract_names(html: str) -> list:
+def extract_names(html):
+    if not html: return []
+    STOP = {
+        "google", "copyright", "search", "facebook", "twitter", "instagram",
+        "yandex", "яндекс", "одноклассники", "вконтакте", "telegram",
+        "whatsapp", "viber", "skype", "snapchat", "tiktok", "linkedin",
+        "pinterest", "reddit", "tumblr", "flickr", "youtube", "ютуб",
+        "download", "upload", "share", "send", "submit", "login", "logout",
+        "страница", "помощь", "поддержка", "справка", "закладки", "раздел",
+        "новости", "лента", "главная", "поиск", "вход", "регистрация",
+        "профиль", "настройки", "безопасность", "конфиденциальность",
+        "реклама", "вакансии", "услуги", "товары", "компания", "организация",
+        "сообщение", "комментарий", "публикация", "видео", "фото", "запись",
+        "музыка", "история", "география", "математика", "физика", "химия",
+        "биология", "литература", "экономика", "политика", "спорт",
+        "культура", "наука", "технологии", "undefined", "null", "none", "loading"
+    }
     pattern = r'[А-ЯЁ][а-яё]+\s[А-ЯЁ][а-яё]+(?:\s[А-ЯЁ][а-яё]+)?'
     raw = re.findall(pattern, html)
-    return list(dict.fromkeys([n for n in raw if is_valid_name(n)]))[:8]
+    valid = []
+    for name in raw:
+        parts = name.split()
+        if len(parts) < 2 or len(parts) > 3: continue
+        if any(p.lower() in STOP for p in parts): continue
+        valid.append(name)
+    return list(dict.fromkeys(valid))[:8]
 
-# ====== ИНСТРУМЕНТЫ ДЛЯ ГЛУБОКОГО ПОИСКА ПО ЮЗЕРНЕЙМУ ======
+def extract_social_links(html):
+    if not html: return []
+    urls = re.findall(r'https?://[^\s"\'<>]+', html)
+    found = []
+    for u in urls:
+        u = u.rstrip('.,;:!?')
+        # GitHub профиль
+        gh_match = re.match(r'https://github\.com/([a-zA-Z0-9_-]+)/?$', u)
+        if gh_match:
+            user = gh_match.group(1)
+            if user not in ["search", "features", "fluidicon", "mcp", "why-github", "security", "topics", "marketplace", "explore", "notifications"]:
+                found.append(u)
+                continue
+        # Другие соцсети
+        if any(p in u.lower() for p in ['vk.com/', 'instagram.com/', 'facebook.com/', 'twitter.com/',
+                                        't.me/', 'linkedin.com/in/', 'ok.ru/profile/', 'pinterest.com/',
+                                        'reddit.com/user/', 'steamcommunity.com/id/']):
+            found.append(u)
+    return list(dict.fromkeys(found))[:6]
+
 async def fetch(session, url, ua, timeout=12):
-    headers = {"User-Agent": ua, "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8"}
+    headers = {"User-Agent": ua, "Accept-Language": "ru-RU,ru;q=0.9"}
     try:
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
             if resp.status == 200:
                 return await resp.text()
-    except:
-        pass
+    except Exception as e:
+        print(f"[!] Ошибка запроса {url}: {e}")
     return ""
 
-def extract_phones(html: str) -> list:
-    phones = re.findall(r'(\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', html)
-    clean = [re.sub(r'\D', '', p)[-10:] for p in phones]
-    return list(set(clean))
+# ====== DaData ======
+async def probe_dadata(phone):
+    url = "https://cleaner.dadata.ru/api/v1/clean/phone"
+    headers = {
+        "Authorization": f"Token {DADATA_API_KEY}",
+        "X-Secret": DADATA_SECRET_KEY,
+        "Content-Type": "application/json"
+    }
+    try:
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(url, headers=headers, json=[phone]) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    r = data[0]
+                    return {
+                        "phone": r.get("phone", phone),
+                        "operator": r.get("provider") or "Не определен",
+                        "region": r.get("region") or "Неизвестно",
+                        "city": r.get("city") or "Не указан",
+                        "timezone": r.get("timezone", "UTC+0"),
+                        "type": r.get("type", "Мобильный")
+                    }
+    except Exception as e:
+        print(f"[!] DaData error: {e}")
+    return None
 
-def extract_emails(html: str) -> list:
-    emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', html)
-    return list(set(emails))[:5]
+# ====== ПОИСК ПО НОМЕРУ (глубокий) ======
+async def google_phone(session, phone, ua):
+    print(f"[Google] Поиск по номеру +7{phone}")
+    query = quote(f"+7{phone}")
+    url = f"https://www.google.com/search?q={query}&hl=ru&num=20"
+    html = await fetch(session, url, ua)
+    names = extract_names(html)
+    print(f"[Google] Найдено имён: {len(names)}")
+    return names
 
-def extract_social_links(html: str) -> list:
-    """Собирает ссылки на профили (vk, instagram, facebook, twitter, github и т.д.)"""
-    urls = re.findall(r'https?://[^\s"\'<>]+', html)
-    platforms = [
-        'vk.com/', 'instagram.com/', 'facebook.com/', 'twitter.com/',
-        'github.com/', 't.me/', 'linkedin.com/in/', 'ok.ru/profile/',
-        'pinterest.com/', 'reddit.com/user/'
+async def yandex_phone(session, phone, ua):
+    print(f"[Yandex] Поиск по номеру +7{phone}")
+    query = quote(f"+7{phone}")
+    url = f"https://yandex.ru/search/?text={query}&lr=213"
+    html = await fetch(session, url, ua)
+    names = extract_names(html)
+    print(f"[Yandex] Найдено имён: {len(names)}")
+    return names
+
+async def zvonili_phone(session, phone, ua):
+    print(f"[Zvonili] Запрос +7{phone}")
+    url = f"https://zvonili.com/phone/+7{phone}"
+    html = await fetch(session, url, ua)
+    names = extract_names(html)
+    print(f"[Zvonili] Найдено имён: {len(names)}")
+    return names
+
+async def whocalls_phone(session, phone, ua):
+    print(f"[WhoCalls] Запрос +7{phone}")
+    url = f"https://who-calls.me/phone/7{phone}"
+    html = await fetch(session, url, ua)
+    names = extract_names(html)
+    print(f"[WhoCalls] Найдено имён: {len(names)}")
+    return names
+
+async def nomer_phone(session, phone, ua):
+    print(f"[Nomer] Запрос +7{phone}")
+    url = f"https://nomer.net/telefon/+7{phone}"
+    html = await fetch(session, url, ua)
+    names = extract_names(html)
+    print(f"[Nomer] Найдено имён: {len(names)}")
+    return names
+
+async def collect_phone_data(phone, status_callback=None):
+    dadata_task = asyncio.create_task(probe_dadata(phone))
+    all_names = []
+    sources_stats = {}
+    sources = [
+        ("Google", google_phone),
+        ("Yandex", yandex_phone),
+        ("Zvonili.com", zvonili_phone),
+        ("WhoCalls", whocalls_phone),
+        ("Nomer.net", nomer_phone)
     ]
-    found = []
-    for u in urls:
-        u = u.rstrip('.,;:!?')
-        if any(p in u.lower() for p in platforms) and not any(ext in u for ext in ['.js','.css','.png','.jpg']):
-            found.append(u)
-    return list(dict.fromkeys(found))[:5]
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for i, (name, func) in enumerate(sources):
+            ua = USER_AGENTS[i % len(USER_AGENTS)]
+            browser = BROWSER_NAMES[i % len(BROWSER_NAMES)]
+            tasks.append((name, browser, asyncio.create_task(func(session, phone, ua))))
+            await asyncio.sleep(random.uniform(0.8, 1.5))
+        completed = 0
+        total = len(sources)
+        for name, browser, task in tasks:
+            try:
+                names = await asyncio.wait_for(task, timeout=60)
+                all_names.extend(names)
+                sources_stats[name] = {"status": "✅", "names": len(names)}
+                completed += 1
+                if status_callback:
+                    await status_callback(completed, total, name, browser)
+            except Exception as e:
+                print(f"[!] Ошибка {name}: {e}")
+                sources_stats[name] = {"status": "❌", "names": 0}
+                completed += 1
+                if status_callback:
+                    await status_callback(completed, total, name, browser)
+    dadata_info = await dadata_task
+    all_names = list(dict.fromkeys(all_names))[:8]
+    return {
+        "dadata": dadata_info,
+        "names": all_names,
+        "sources": sources_stats,
+        "total_sources": total
+    }
 
-# ====== ДОРКИ ДЛЯ ГЛУБОКОГО ПОИСКА ======
+# ====== ПОИСК ПО ЮЗЕРНЕЙМУ (полный сбор) ======
 DORKS = [
     '"{username}" phone OR tel OR +7',
     '"{username}" email OR почта',
@@ -137,173 +239,125 @@ DORKS = [
     '"{username}" facebook',
     '"{username}" twitter',
     '"{username}" github',
-    '"{username}" site:psbdmp.ws',
     '"{username}" site:pastebin.com',
-    '"{username}" site:forum.mozilla-russia.org',
+    '"{username}" site:psbdmp.ws',
+    '"{username}" site:t.me',
+    '"{username}" "телефон"',
+    '"{username}" "номер"',
+    '"{username}" контакт',
+    '"{username}" address OR адрес',
+    '"{username}" паспорт',
     '"{username}" site:4pda.to',
     '"{username}" site:habr.com',
-    '"{username}" site:t.me',
-    '"{username}" "телефон" OR "номер"',
+    '"{username}" site:forum.mozilla-russia.org',
+    '"{username}" site:freelance.ru',
+    '"{username}" site:avito.ru',
 ]
 
-async def google_dork_search(session, username, ua):
-    results = []
-    for dork in DORKS[:8]:  # берем 8 самых важных дорков, чтобы уложиться во время
-        query = quote(dork.format(username=username))
-        url = f"https://www.google.com/search?q={query}&num=20&hl=ru"
-        html = await fetch(session, url, ua)
-        if html:
-            phones = extract_phones(html)
-            emails = extract_emails(html)
-            social = extract_social_links(html)
-            names = extract_names(html)
-            results.append({
-                "dork": dork,
-                "phones": phones,
-                "emails": emails,
-                "social": social,
-                "names": names
-            })
-        await asyncio.sleep(random.uniform(1.2, 2.5))  # задержка между запросами
-    return results
+async def process_dork(session, username, dork, ua):
+    query = quote(dork.format(username=username))
+    url = f"https://www.google.com/search?q={query}&num=20&hl=ru"
+    html = await fetch(session, url, ua)
+    if not html:
+        return {"dork": dork, "phones": [], "emails": [], "names": [], "social": []}
+    phones = extract_phones(html)
+    emails = extract_emails(html)
+    names = extract_names(html)
+    social = extract_social_links(html)
+    print(f"[Dork] {dork}: телефонов={len(phones)}, email={len(emails)}, имена={len(names)}, соцсети={len(social)}")
+    return {"dork": dork, "phones": phones, "emails": emails, "names": names, "social": social}
 
-async def yandex_dork_search(session, username, ua):
-    results = []
-    for dork in DORKS[:6]:
-        query = quote(dork.format(username=username))
-        url = f"https://yandex.ru/search/?text={query}&lr=213"
-        html = await fetch(session, url, ua)
-        if html:
-            phones = extract_phones(html)
-            emails = extract_emails(html)
-            social = extract_social_links(html)
-            names = extract_names(html)
-            results.append({
-                "dork": f"Yandex: {dork}",
-                "phones": phones,
-                "emails": emails,
-                "social": social,
-                "names": names
-            })
-        await asyncio.sleep(random.uniform(1.0, 2.0))
-    return results
-
-async def forum_search(session, username, ua):
-    """Поиск на некоторых форумах, где могут быть утечки"""
-    forums = [
-        f"https://zvonili.com/search/?q={username}",
-        f"https://who-calls.me/search/?q={username}",
-        f"https://nomer.net/search/?q={username}"
-    ]
-    all_phones = []
-    for url in forums:
-        html = await fetch(session, url, ua)
-        if html:
-            all_phones.extend(extract_phones(html))
-        await asyncio.sleep(random.uniform(0.8, 1.5))
-    return list(set(all_phones))
-
-# ====== СБОР ДАННЫХ ======
 async def deep_osint_username(username, status_callback=None):
     all_phones = set()
     all_emails = set()
     all_names = []
     all_social = []
     sources_stats = {}
-    total_sources = 10  # примерное количество
-    completed = 0
+    total_sources = len(DORKS) + 3  # + GitHub, форумы, PSBDMP отдельно
 
     async with aiohttp.ClientSession() as session:
-        # Google
-        try:
+        # 1. Все Google-дорки
+        for i, dork in enumerate(DORKS, 1):
+            ua = USER_AGENTS[i % len(USER_AGENTS)]
+            browser = BROWSER_NAMES[i % len(BROWSER_NAMES)]
             if status_callback:
-                await status_callback(1, total_sources, "Google дорки", BROWSER_NAMES[0])
-            google_results = await google_dork_search(session, username, USER_AGENTS[0])
-            for r in google_results:
-                all_phones.update(r["phones"])
-                all_emails.update(r["emails"])
-                all_names.extend(r["names"])
-                all_social.extend(r["social"])
-            sources_stats["Google"] = {"status": "✅", "details": f"{len(google_results)} дорков"}
-        except:
-            sources_stats["Google"] = {"status": "❌"}
-        completed += 1
-        await asyncio.sleep(0.5)
+                await status_callback(i, total_sources, f"Dork {i}/{len(DORKS)}: {dork[:40]}...", browser)
+            try:
+                res = await asyncio.wait_for(process_dork(session, username, dork, ua), timeout=45)
+                all_phones.update(res["phones"])
+                all_emails.update(res["emails"])
+                all_names.extend(res["names"])
+                all_social.extend(res["social"])
+                sources_stats[f"Dork {i}"] = {"status": "✅", "phones": len(res["phones"]), "emails": len(res["emails"])}
+            except Exception as e:
+                sources_stats[f"Dork {i}"] = {"status": "❌"}
+                print(f"[!] Ошибка дорка {i}: {e}")
+            await asyncio.sleep(random.uniform(0.5, 1.2))
 
-        # Yandex
+        # 2. GitHub отдельно
+        idx = len(DORKS) + 1
+        ua = USER_AGENTS[idx % len(USER_AGENTS)]
+        browser = BROWSER_NAMES[idx % len(BROWSER_NAMES)]
+        if status_callback:
+            await status_callback(idx, total_sources, "GitHub", browser)
         try:
-            if status_callback:
-                await status_callback(2, total_sources, "Яндекс дорки", BROWSER_NAMES[1])
-            yandex_results = await yandex_dork_search(session, username, USER_AGENTS[1])
-            for r in yandex_results:
-                all_phones.update(r["phones"])
-                all_emails.update(r["emails"])
-                all_names.extend(r["names"])
-                all_social.extend(r["social"])
-            sources_stats["Yandex"] = {"status": "✅", "details": f"{len(yandex_results)} дорков"}
-        except:
-            sources_stats["Yandex"] = {"status": "❌"}
-        completed += 1
-        await asyncio.sleep(0.5)
-
-        # Форумы
-        try:
-            if status_callback:
-                await status_callback(3, total_sources, "Форумы определители", BROWSER_NAMES[2])
-            forum_phones = await forum_search(session, username, USER_AGENTS[2])
-            all_phones.update(forum_phones)
-            sources_stats["Форумы"] = {"status": "✅", "details": f"{len(forum_phones)} номеров"}
-        except:
-            sources_stats["Форумы"] = {"status": "❌"}
-        completed += 1
-        await asyncio.sleep(0.5)
-
-        # Дополнительные источники: GitHub
-        try:
-            if status_callback:
-                await status_callback(4, total_sources, "GitHub", BROWSER_NAMES[3])
             github_url = f"https://github.com/search?q={username}&type=users"
-            html = await fetch(session, github_url, USER_AGENTS[3])
+            html = await fetch(session, github_url, ua)
             if html:
-                # Ищем ссылки на профили
-                profile_links = re.findall(r'https://github\.com/[a-zA-Z0-9_-]+', html)
-                all_social.extend(profile_links)
-                # email в профилях GitHub часто в виде username@users.noreply.github.com, но это неинтересно
-            sources_stats["GitHub"] = {"status": "✅", "details": f"{len(profile_links) if profile_links else 0} профилей"}
+                profiles = re.findall(r'https://github\.com/[a-zA-Z0-9_-]+', html)
+                for p in profiles:
+                    if re.match(r'https://github\.com/[a-zA-Z0-9_-]+$', p):
+                        all_social.append(p)
+            sources_stats["GitHub"] = {"status": "✅", "profiles": len(all_social)}
+            print(f"[GitHub] Профилей: {len(all_social)}")
         except:
             sources_stats["GitHub"] = {"status": "❌"}
-        completed += 1
-        await asyncio.sleep(0.5)
 
-        # Pastebin / утечки через Google уже были, добавим PSBDMP
+        # 3. PSBDMP (утечки)
+        idx += 1
+        ua = USER_AGENTS[idx % len(USER_AGENTS)]
+        browser = BROWSER_NAMES[idx % len(BROWSER_NAMES)]
+        if status_callback:
+            await status_callback(idx, total_sources, "PSBDMP", browser)
         try:
-            if status_callback:
-                await status_callback(5, total_sources, "PSBDMP (утечки)", BROWSER_NAMES[4])
-            psbdmp_url = f"https://psbdmp.ws/search?q={username}"
-            html = await fetch(session, psbdmp_url, USER_AGENTS[4])
-            if html:
-                emails = extract_emails(html)
-                phones = extract_phones(html)
-                all_emails.update(emails)
-                all_phones.update(phones)
-            sources_stats["PSBDMP"] = {"status": "✅", "details": f"{len(phones) if phones else 0} тлф"}
+            psbdmp_url = f"https://psbdmp.ws/api/search/{username}"
+            async with session.get(psbdmp_url, headers={"User-Agent": ua}) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for paste in data.get("data", []):
+                        content = paste.get("content", "")
+                        phones = extract_phones(content)
+                        emails = extract_emails(content)
+                        names = extract_names(content)
+                        all_phones.update(phones)
+                        all_emails.update(emails)
+                        all_names.extend(names)
+            sources_stats["PSBDMP"] = {"status": "✅", "phones": len(all_phones), "emails": len(all_emails)}
         except:
             sources_stats["PSBDMP"] = {"status": "❌"}
-        completed += 1
-        await asyncio.sleep(0.5)
 
-        # Ещё один проход по форумам: 4pda, habr (вдруг осталось в Google?)
-        # Уже было в дорках, но можно повторить
-
-        # Обновим прогресс
+        # 4. Форумы-определители (через поиск по нику)
+        idx += 1
+        ua = USER_AGENTS[idx % len(USER_AGENTS)]
+        browser = BROWSER_NAMES[idx % len(BROWSER_NAMES)]
         if status_callback:
-            for i in range(6, total_sources):
-                await status_callback(i, total_sources, "Дополнительный сбор", BROWSER_NAMES[i % len(BROWSER_NAMES)])
-                await asyncio.sleep(0.3)
+            await status_callback(idx, total_sources, "Форумы", browser)
+        try:
+            forum_urls = [
+                f"https://zvonili.com/search/?q={username}",
+                f"https://who-calls.me/search/?q={username}"
+            ]
+            for fu in forum_urls:
+                html = await fetch(session, fu, ua)
+                if html:
+                    all_phones.update(extract_phones(html))
+            sources_stats["Форумы"] = {"status": "✅", "phones": len(all_phones)}
+        except:
+            sources_stats["Форумы"] = {"status": "❌"}
 
-    # Финальная чистка
-    all_names = list(dict.fromkeys([n for n in all_names if is_valid_name(n)]))[:8]
-    all_social = list(dict.fromkeys(all_social))[:6]
+    # Финальная обработка
+    all_names = list(dict.fromkeys(all_names))[:10]
+    all_social = list(dict.fromkeys(all_social))[:8]
     all_phones = sorted(list(all_phones))[:10]
     all_emails = list(all_emails)[:5]
 
@@ -321,15 +375,17 @@ async def deep_osint_username(username, status_callback=None):
 async def start(msg: Message):
     await msg.answer(
         "╔══════════════════════════╗\n"
-        "║   🛡 <b>ULTIMATE OSINT</b>    ║\n"
-        "║   Глубокий пробив v11.0   ║\n"
+        "║   🛡 <b>ULTIMATE OSINT v12</b> ║\n"
+        "║   Максимальный пробив     ║\n"
         "╚══════════════════════════╝\n"
         "\n"
-        "🔹 <b>Номер телефона</b> — поиск имён, оператора, региона\n"
-        "🔹 <b>Юзернейм (@...)</b> — поиск всех утечек, телефонов, email, соцсетей\n"
-        "    (работает до 5 минут, ротация 12 браузеров, десятки дорков)\n"
+        "📡 <b>Номер:</b> поиск имён через DaData, Google, Yandex, Zvonili, WhoCalls, Nomer\n"
+        "📡 <b>Юзернейм (@...):</b> 20 дорков, GitHub, утечки, форумы\n"
         "\n"
-        "👇 Отправьте номер или юзернейм",
+        "🔎 В реальном времени показываю логи каждого шага.\n"
+        "⏱ Макс. время: 5 минут.\n"
+        "\n"
+        "👇 Отправьте номер или @username",
         parse_mode=ParseMode.HTML
     )
 
@@ -357,44 +413,45 @@ async def handle_input(msg: Message):
         username = classification["value"]
         user_sessions[msg.from_user.id] = {"type": "username", "value": username, "result": None}
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 ТОТАЛЬНЫЙ ПОИСК ПО ЮЗУ", callback_data="deep_scan_username")],
+            [InlineKeyboardButton(text="🔍 ТОТАЛЬНЫЙ ПОИСК", callback_data="deep_scan_username")],
             [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel")]
         ])
         await msg.answer(
             f"🎯 <b>ЮЗЕРНЕЙМ:</b> @{username}\n\n"
-            "⚠️ Запускаю глубочайший сбор данных: Google/Yandex дорки, форумы, GitHub, утечки.\n"
-            "Будут найдены: телефоны, email, имена, ссылки на соцсети.\n"
-            "<i>Время до 5 мин.</i>",
+            "Будет выполнен поиск по 20 доркам, GitHub, утечкам, форумам.\n"
+            "Каждый шаг логируется в реальном времени.\n"
+            "Максимальное время — 5 мин.",
             reply_markup=kb, parse_mode=ParseMode.HTML
         )
 
     else:
         await msg.answer("❌ Не удалось определить номер или юзернейм. Попробуйте ещё раз.")
 
+# Общая функция обновления статуса
 async def update_status(msg, done, total, current_source, browser, mode="phone"):
     bar_len = 10
     filled = int(bar_len * done / total)
     bar = "▓" * filled + "░" * (bar_len - filled)
     pct = int(done / total * 100)
-
     status = (
         f"╔══════════════════════════╗\n"
-        f"║    🔎 <b>{'ПОИСК ЮЗЕРА' if mode == 'username' else 'ПОИСК НОМЕРА'}</b>    ║\n"
+        f"║    🔎 <b>{'СБОР ДАННЫХ' if mode == 'username' else 'ГЛУБОКИЙ ПОИСК'}</b>    ║\n"
         f"╚══════════════════════════╝\n"
         f"\n"
         f"Прогресс: [{bar}] {pct}%\n"
         f"Выполнено: {done}/{total}\n"
         f"\n"
-        f"🌐 <b>Источник:</b> {current_source}\n"
+        f"🌐 <b>Текущий шаг:</b> {current_source}\n"
         f"🖥 <b>Браузер:</b> {browser}\n"
         f"\n"
-        f"⏳ <i>Выжимаем каждую каплю данных...</i>"
+        f"⏳ <i>Выжимаем все соки из интернета...</i>"
     )
     try:
         await msg.edit_text(status, parse_mode=ParseMode.HTML)
     except:
         pass
 
+# Быстрый поиск по номеру
 @dp.callback_query(F.data == "quick_scan")
 async def quick_scan(cb: CallbackQuery):
     data = user_sessions.get(cb.from_user.id)
@@ -403,31 +460,8 @@ async def quick_scan(cb: CallbackQuery):
         return
     phone = data["value"]
     formatted = f"+7 ({phone[0:3]}) {phone[3:6]}-{phone[6:8]}-{phone[8:10]}"
-    status_msg = await cb.message.edit_text("⚡ Быстрый поиск через DaData...", parse_mode=ParseMode.HTML)
-    # Используем старую функцию probe_dadata
-    url = "https://cleaner.dadata.ru/api/v1/clean/phone"
-    headers = {
-        "Authorization": f"Token {DADATA_API_KEY}",
-        "X-Secret": DADATA_SECRET_KEY,
-        "Content-Type": "application/json"
-    }
-    info = None
-    try:
-        async with aiohttp.ClientSession() as sess:
-            async with sess.post(url, headers=headers, json=[phone]) as resp:
-                if resp.status == 200:
-                    r = (await resp.json())[0]
-                    info = {
-                        "phone": r.get("phone", phone),
-                        "operator": r.get("provider") or "Не определен",
-                        "region": r.get("region") or "Неизвестно",
-                        "city": r.get("city") or "Не указан",
-                        "timezone": r.get("timezone", "UTC+0"),
-                        "type": r.get("type", "Мобильный")
-                    }
-    except:
-        pass
-
+    status_msg = await cb.message.edit_text("⚡ Быстрый запрос к DaData...")
+    info = await probe_dadata(phone)
     if info:
         report = (
             f"╔══════════════════════════╗\n"
@@ -441,7 +475,6 @@ async def quick_scan(cb: CallbackQuery):
         )
     else:
         report = "❌ DaData не ответил."
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔎 ГЛУБОКИЙ ПОИСК", callback_data="deep_scan_phone")],
         [InlineKeyboardButton(text="🔙 НАЗАД", callback_data="back_to_choice")]
@@ -449,6 +482,7 @@ async def quick_scan(cb: CallbackQuery):
     await status_msg.edit_text(report, parse_mode=ParseMode.HTML, reply_markup=kb)
     await cb.answer()
 
+# Глубокий поиск номера
 @dp.callback_query(F.data == "deep_scan_phone")
 async def deep_scan_phone(cb: CallbackQuery):
     data = user_sessions.get(cb.from_user.id)
@@ -457,20 +491,34 @@ async def deep_scan_phone(cb: CallbackQuery):
         return
     phone = data["value"]
     formatted = f"+7 ({phone[0:3]}) {phone[3:6]}-{phone[6:8]}-{phone[8:10]}"
-    status_msg = await cb.message.edit_text("⏳ Запуск глубокого поиска по номеру...", parse_mode=ParseMode.HTML)
+    status_msg = await cb.message.edit_text("⏳ Глубокий поиск запущен...")
 
-    # Эта функция уже определена в предыдущих версиях, оставлю заглушку
-    # Для полноты можно вставить старый код collect_phone_data
-    # Но сейчас фокус на юзернеймах, поэтому быстро верну отчёт
+    async def status_callback(done, total, source, browser):
+        await update_status(status_msg, done, total, source, browser, mode="phone")
+
+    try:
+        result = await asyncio.wait_for(collect_phone_data(phone, status_callback), timeout=300)
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("❌ Превышено время поиска (5 минут).")
+        await cb.answer()
+        return
+
+    data["result"] = result
+    # Показать результат с выбором вариантов отчёта
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1️⃣ ОСНОВНОЙ", callback_data="report_phone_basic")],
+        [InlineKeyboardButton(text="2️⃣ РАСШИРЕННЫЙ", callback_data="report_phone_extended")],
+        [InlineKeyboardButton(text="3️⃣ ТЕХНИЧЕСКИЙ", callback_data="report_phone_tech")],
+        [InlineKeyboardButton(text="🔙 НАЗАД", callback_data="back_to_choice")]
+    ])
     await status_msg.edit_text(
-        "✅ Поиск по номеру: функция временно недоступна в этой версии.\n"
-        "Пожалуйста, используйте быстрый поиск или попробуйте позже.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 НАЗАД", callback_data="back_to_choice")]
-        ])
+        "✅ <b>Глубокий поиск завершён!</b>\nВыберите вариант отчёта:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
     )
     await cb.answer()
 
+# Тотальный поиск юзернейма
 @dp.callback_query(F.data == "deep_scan_username")
 async def deep_scan_username(cb: CallbackQuery):
     data = user_sessions.get(cb.from_user.id)
@@ -478,31 +526,25 @@ async def deep_scan_username(cb: CallbackQuery):
         await cb.answer("Сессия устарела.", show_alert=True)
         return
     username = data["value"]
-    status_msg = await cb.message.edit_text("⏳ Запуск тотального поиска...", parse_mode=ParseMode.HTML)
+    status_msg = await cb.message.edit_text("⏳ Запуск тотального поиска...")
 
     async def status_callback(done, total, source, browser):
         await update_status(status_msg, done, total, source, browser, mode="username")
 
     try:
-        result = await asyncio.wait_for(
-            deep_osint_username(username, status_callback),
-            timeout=300
-        )
+        result = await asyncio.wait_for(deep_osint_username(username, status_callback), timeout=300)
     except asyncio.TimeoutError:
-        await status_msg.edit_text("❌ Превышено время ожидания (5 минут).")
+        await status_msg.edit_text("❌ Превышено время поиска (5 минут).")
         await cb.answer()
         return
 
     data["result"] = result
-
-    # Три варианта отчёта
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1️⃣ ОСНОВНОЙ", callback_data="report_username_basic")],
-        [InlineKeyboardButton(text="2️⃣ РАСШИРЕННЫЙ", callback_data="report_username_extended")],
-        [InlineKeyboardButton(text="3️⃣ ТЕХНИЧЕСКИЙ", callback_data="report_username_tech")],
-        [InlineKeyboardButton(text="🔙 ОТМЕНА", callback_data="cancel")]
+        [InlineKeyboardButton(text="1️⃣ ОСНОВНОЙ", callback_data="report_user_basic")],
+        [InlineKeyboardButton(text="2️⃣ РАСШИРЕННЫЙ", callback_data="report_user_extended")],
+        [InlineKeyboardButton(text="3️⃣ ТЕХНИЧЕСКИЙ", callback_data="report_user_tech")],
+        [InlineKeyboardButton(text="🔙 НАЗАД", callback_data="back_to_choice")]
     ])
-
     await status_msg.edit_text(
         "✅ <b>Тотальный поиск завершён!</b>\nВыберите вариант отчёта:",
         parse_mode=ParseMode.HTML,
@@ -510,89 +552,75 @@ async def deep_scan_username(cb: CallbackQuery):
     )
     await cb.answer()
 
-@dp.callback_query(F.data.startswith("report_username_"))
-async def report_username(cb: CallbackQuery):
+# Варианты отчётов для номера
+@dp.callback_query(F.data.startswith("report_phone_"))
+async def report_phone(cb: CallbackQuery):
     data = user_sessions.get(cb.from_user.id)
     if not data or not data.get("result"):
         await cb.answer("Данные устарели.", show_alert=True)
         return
-
     result = data["result"]
-    username = data["value"]
-    report_type = cb.data
+    d = result["dadata"]
+    phone = data["value"]
+    formatted = f"+7 ({phone[0:3]}) {phone[3:6]}-{phone[6:8]}-{phone[8:10]}"
+    report_type = cb.data.split("_")[-1]  # basic / extended / tech
 
-    if report_type == "report_username_basic":
-        text = (
-            f"╔══════════════════════════╗\n"
-            f"║   📋 <b>ОСНОВНОЙ ОТЧЁТ</b>    ║\n"
-            f"╚══════════════════════════╝\n"
-            f"\n"
-            f"👤 <b>Юзернейм:</b> @{username}\n"
-            f"\n"
-            f"📞 <b>Возможные номера:</b>\n"
-        )
-        if result["phones"]:
-            for i, phone in enumerate(result["phones"], 1):
-                text += f"  {i}. +7 {phone}\n"
-        else:
-            text += "  ❌ не найдены\n"
-        text += f"\n📧 <b>Email:</b>\n"
-        if result["emails"]:
-            for email in result["emails"]:
-                text += f"  • {email}\n"
-        else:
-            text += "  ❌ нет\n"
-        text += f"\n👥 <b>Имена:</b>\n"
-        if result["names"]:
-            for name in result["names"]:
-                text += f"  • {name}\n"
-        else:
-            text += "  ❌ нет\n"
-
-    elif report_type == "report_username_extended":
-        text = (
-            f"╔══════════════════════════╗\n"
-            f"║  🧩 <b>РАСШИРЕННЫЙ ОТЧЁТ</b>  ║\n"
-            f"╚══════════════════════════╝\n"
-            f"\n"
-            f"👤 @{username}\n"
-            f"\n📞 <b>Телефоны:</b> {', '.join(result['phones']) if result['phones'] else 'нет'}\n"
-            f"📧 <b>Email:</b> {', '.join(result['emails']) if result['emails'] else 'нет'}\n"
-            f"👥 <b>Имена:</b> {', '.join(result['names']) if result['names'] else 'нет'}\n"
-            f"\n🌐 <b>Профили в соцсетях:</b>\n"
-        )
-        if result["social"]:
-            for link in result["social"]:
-                text += f"  • {link}\n"
-        else:
-            text += "  ❌ не обнаружены\n"
-
-    elif report_type == "report_username_tech":
-        text = (
-            f"╔══════════════════════════╗\n"
-            f"║  ⚙️ <b>ТЕХНИЧЕСКИЙ ДАМП</b>  ║\n"
-            f"╚══════════════════════════╝\n"
-            f"\n"
-            f"👤 @{username}\n"
-            f"\n<b>Сырые данные:</b>\n"
-            f"📞 {result['phones']}\n"
-            f"📧 {result['emails']}\n"
-            f"👥 {result['names']}\n"
-            f"🌐 {result['social']}\n"
-            f"\n<b>Статистика источников:</b>\n"
-        )
-        for src, info in result["sources"].items():
-            text += f"  {info['status']} {src}: {info.get('details', '')}\n"
-        text += f"\n<b>Всего источников:</b> {result['total_sources']}"
+    if report_type == "basic":
+        text = f"📞 Номер: <code>{formatted}</code>\n"
+        if d:
+            text += f"📡 Оператор: {d['operator']} ({d['type']})\n📍 {d['region']} / {d['city']}\n"
+        text += "\n👤 <b>Вероятные имена:</b>\n" + ("\n".join(f"• {n}" for n in result["names"]) if result["names"] else "❌ не найдены")
+    elif report_type == "extended":
+        text = f"🧩 <b>Расширенный отчёт по номеру</b>\n\n<b>DaData:</b>\n"
+        if d:
+            text += f"Оператор: {d['operator']}\nРегион: {d['region']}\nГород: {d['city']}\nЧасовой пояс: {d['timezone']}\n"
+        text += f"\n<b>Имена:</b> {', '.join(result['names']) if result['names'] else 'нет'}\n"
+        text += f"\n<b>Источники (успешно):</b> {sum(1 for s in result['sources'].values() if s['status']=='✅')}/{result['total_sources']}"
+    else:  # tech
+        text = f"⚙️ Технический дамп\n\n"
+        for src, inf in result["sources"].items():
+            text += f"{inf['status']} {src}: имён={inf.get('names',0)}\n"
+        text += f"\nВсего источников: {result['total_sources']}"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1️⃣ Основной", callback_data="report_username_basic"),
-         InlineKeyboardButton(text="2️⃣ Расширенный", callback_data="report_username_extended")],
-        [InlineKeyboardButton(text="3️⃣ Технический", callback_data="report_username_tech")],
+        [InlineKeyboardButton(text="1️⃣ Основной", callback_data="report_phone_basic"),
+         InlineKeyboardButton(text="2️⃣ Расширенный", callback_data="report_phone_extended")],
+        [InlineKeyboardButton(text="3️⃣ Технический", callback_data="report_phone_tech")],
         [InlineKeyboardButton(text="🔙 НАЗАД", callback_data="back_to_choice")]
     ])
+    await cb.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    await cb.answer()
 
-    await cb.message.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb)
+# Варианты отчётов для юзернейма
+@dp.callback_query(F.data.startswith("report_user_"))
+async def report_user(cb: CallbackQuery):
+    data = user_sessions.get(cb.from_user.id)
+    if not data or not data.get("result"):
+        await cb.answer("Данные устарели.", show_alert=True)
+        return
+    result = data["result"]
+    username = data["value"]
+    report_type = cb.data.split("_")[-1]
+
+    if report_type == "basic":
+        text = f"👤 @{username}\n\n📞 <b>Телефоны:</b> " + (", ".join(result["phones"]) if result["phones"] else "нет")
+        text += "\n📧 <b>Email:</b> " + (", ".join(result["emails"]) if result["emails"] else "нет")
+        text += "\n👥 <b>Имена:</b> " + (", ".join(result["names"]) if result["names"] else "нет")
+    elif report_type == "extended":
+        text = f"🧩 @{username}\n\n📞 Телефоны: {', '.join(result['phones'])}\n📧 Email: {', '.join(result['emails'])}\n👥 Имена: {', '.join(result['names'])}\n🌐 Соцсети:\n" + ("\n".join(result["social"]) if result["social"] else "нет")
+    else:  # tech
+        text = f"⚙️ Дамп\n\n📞 {result['phones']}\n📧 {result['emails']}\n👥 {result['names']}\n🌐 {result['social']}\n\n<b>Источники:</b>\n"
+        for src, inf in result["sources"].items():
+            text += f"{inf.get('status','?')} {src}\n"
+        text += f"\nВсего: {result['total_sources']}"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1️⃣ Основной", callback_data="report_user_basic"),
+         InlineKeyboardButton(text="2️⃣ Расширенный", callback_data="report_user_extended")],
+        [InlineKeyboardButton(text="3️⃣ Технический", callback_data="report_user_tech")],
+        [InlineKeyboardButton(text="🔙 НАЗАД", callback_data="back_to_choice")]
+    ])
+    await cb.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     await cb.answer()
 
 @dp.callback_query(F.data == "back_to_choice")
