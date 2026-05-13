@@ -37,11 +37,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (Linux; Android 14; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/23.0 Chrome/120.0.0.0 Mobile Safari/537.36"
 ]
 
-# Браузеры для статуса
 BROWSER_NAMES = ["Chrome Win", "Chrome Win2", "Chrome Mac", "Firefox Win", "Firefox Linux", "Firefox Mac",
                  "Safari Mac", "Safari iOS", "Edge Win", "Edge Win2", "Opera Win", "Samsung Android"]
 
-# Стоп-слова для имён (страны, мусор)
+# Расширенный стоп-лист для имён
 STOP_WORDS = [
     "страница", "помощь", "поддержка", "справка", "закладки", "раздел",
     "экваториальная", "гвинея", "северная", "корея", "новая", "зеландия",
@@ -54,7 +53,24 @@ STOP_WORDS = [
     "видео", "фото", "запись", "лента", "новости", "главная", "поиск",
     "вход", "регистрация", "профиль", "настройки", "безопасность",
     "конфиденциальность", "реклама", "вакансии", "услуги", "товары",
-    "undefined", "null", "none", "loading"
+    "undefined", "null", "none", "loading",
+    # Географические названия, которые могут попасться
+    "нидерланды", "французская", "гвиана", "полинезия", "саудовская",
+    "аравия", "южный", "судан", "карибские", "если", "вам",
+    "google", "copyright", "search", "facebook", "twitter", "instagram",
+    "yandex", "яндекс", "одноклассники", "вконтакте", "telegram",
+    "whatsapp", "viber", "skype", "snapchat", "tiktok", "linkedin",
+    "pinterest", "reddit", "tumblr", "flickr", "youtube", "ютуб",
+    "download", "upload", "share", "send", "submit"
+]
+
+# Дополнительно: слова, которые точно не могут быть частью имени
+INVALID_NAME_TOKENS = STOP_WORDS + [
+    "google", "copyright", "search", "facebook", "twitter", "instagram",
+    "yandex", "яндекс", "одноклассники", "вконтакте", "telegram",
+    "whatsapp", "viber", "skype", "snapchat", "tiktok", "linkedin",
+    "pinterest", "reddit", "tumblr", "flickr", "youtube", "ютуб",
+    "download", "upload", "share", "send", "submit"
 ]
 
 bot = Bot(token=TOKEN)
@@ -97,22 +113,34 @@ async def fetch_text(session, url, headers, timeout=15):
     return None
 
 def is_valid_name(name: str) -> bool:
-    """Проверяет, похоже ли это на реальное имя человека"""
-    name_lower = name.lower().strip()
-    parts = name_lower.split()
-    if len(parts) < 2 or len(parts) > 3:
+    """Жёсткая проверка: только реальные ФИО, без мусора"""
+    name = name.strip()
+    # Имя должно содержать минимум 2 слова (русские или английские буквы)
+    if not re.match(r'^[А-ЯЁ][а-яё]+\s[А-ЯЁ][а-яё]+(?:\s[А-ЯЁ][а-яё]+)?$', name, re.IGNORECASE) and \
+       not re.match(r'^[A-Z][a-z]+\s[A-Z][a-z]+(?:\s[A-Z][a-z]+)?$', name):
         return False
-    for word in parts:
+
+    # Проверяем каждое слово на вхождение в стоп-слова или нежелательные токены
+    for word in name.split():
+        wl = word.lower()
+        if wl in INVALID_NAME_TOKENS:
+            return False
+        # Дополнительно: если слово короче 2 букв — не имя
         if len(word) < 2:
             return False
-        if word in STOP_WORDS:
-            return False
+    # Исключаем фразы целиком, если они в точности совпадают со стоп-словами (например, "Google Search")
+    if name.lower() in [w.lower() for w in INVALID_NAME_TOKENS]:
+        return False
+    # Проверка на наличие цифр и спецсимволов
+    if re.search(r'[^а-яёА-ЯЁa-zA-Z\s]', name):
+        return False
     return True
 
 def extract_names(text: str) -> list:
-    """Достаёт только реальные имена (ФИО) через regex"""
+    """Вытаскивает только реальные имена (ФИО) через regex с расширенным фильтром"""
     if not text:
         return []
+    # Паттерны русских и английских имён
     patterns = [
         r'[А-ЯЁ][а-яё]+\s[А-ЯЁ][а-яё]+(?:\s[А-ЯЁ][а-яё]+)?',
         r'[A-Z][a-z]+\s[A-Z][a-z]+(?:\s[A-Z][a-z]+)?'
@@ -123,23 +151,41 @@ def extract_names(text: str) -> list:
         for m in matches:
             if is_valid_name(m):
                 names.append(m)
-    return list(dict.fromkeys(names))[:5]
+    # Убираем дубликаты, сохраняя порядок
+    seen = set()
+    unique = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            unique.append(n)
+    return unique[:8]  # ограничим количество
 
 def extract_social_links(text: str) -> list:
-    """Вытаскивает только ссылки на профили, не js/css"""
+    """Вытаскивает только профили социальных сетей и мессенджеров, исключая мусор"""
     if not text:
         return []
-    exclude = ['.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.ico', '.xml']
+    # Исключаемые расширения и фрагменты
+    exclude_ext = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.woff', '.ico', '.xml', '.json', '.webp')
+    exclude_domains = ('login.', 'papi.', 'st4-', 'pushsse', 'share.php', 'oauth', 'api.')
     urls = re.findall(r'https?://[^\s"\'<>]+', text)
-    links = []
+    clean_links = []
     for u in urls:
-        u_clean = u.rstrip('.,;:!?')
-        if any(u_clean.endswith(ext) for ext in exclude):
+        u = u.rstrip('.,;:!?')
+        # Отбрасываем файлы по расширению
+        if any(u.lower().endswith(ext) for ext in exclude_ext):
             continue
-        if any(x in u_clean.lower() for x in ['vk.com/id', 'vk.com/', 'instagram.com/', 'facebook.com/', 'ok.ru/profile/', 't.me/']):
-            links.append(u_clean)
-    return list(dict.fromkeys(links))[:5]
+        # Отбрасываем по наличию служебных подстрок
+        if any(part in u.lower() for part in exclude_domains):
+            continue
+        # Исключаем все ссылки на vk.com (ВК полностью нахрен)
+        if 'vk.com' in u.lower():
+            continue
+        # Принимаем только ссылки на соцсети/профили
+        if any(soc in u.lower() for soc in ['instagram.com/', 'facebook.com/', 'ok.ru/profile/', 't.me/', 'linkedin.com/in/', 'twitter.com/', 'pinterest.com/', 'snapchat.com/']):
+            clean_links.append(u)
+    return list(dict.fromkeys(clean_links))[:6]
 
+# ====== Источники поиска ======
 async def search_google(session, phone: str, ua: str) -> tuple:
     query = quote(f"+7{phone}")
     url = f"https://www.google.com/search?q={query}&hl=ru&num=20"
@@ -149,13 +195,14 @@ async def search_google(session, phone: str, ua: str) -> tuple:
     links = extract_social_links(html) if html else []
     return ("Google", names, links)
 
-async def search_vk(session, phone: str, ua: str) -> tuple:
-    url = f"https://vk.com/search?c[section]=people&c[phone]=+7{phone}"
-    headers = {"User-Agent": ua, "X-Requested-With": "XMLHttpRequest"}
+async def search_yandex(session, phone: str, ua: str) -> tuple:
+    query = quote(f"+7{phone}")
+    url = f"https://yandex.ru/search/?text={query}&lr=213"
+    headers = {"User-Agent": ua, "Accept-Language": "ru-RU,ru;q=0.9"}
     html = await fetch_text(session, url, headers)
     names = extract_names(html) if html else []
     links = extract_social_links(html) if html else []
-    return ("VK", names, links)
+    return ("Yandex", names, links)
 
 async def search_zvonili(session, phone: str, ua: str) -> tuple:
     url = f"https://zvonili.com/phone/+7{phone}"
@@ -163,7 +210,7 @@ async def search_zvonili(session, phone: str, ua: str) -> tuple:
     html = await fetch_text(session, url, headers)
     names = extract_names(html) if html else []
     links = extract_social_links(html) if html else []
-    return ("Zvonili.com", names, links)
+    return ("Zvonili", names, links)
 
 async def search_whocalls(session, phone: str, ua: str) -> tuple:
     url = f"https://who-calls.me/phone/7{phone}"
@@ -179,19 +226,25 @@ async def search_nomer(session, phone: str, ua: str) -> tuple:
     html = await fetch_text(session, url, headers)
     names = extract_names(html) if html else []
     links = extract_social_links(html) if html else []
-    return ("Nomer.net", names, links)
+    return ("Nomer", names, links)
 
-async def search_telegram(session, phone: str, ua: str) -> tuple:
-    query = quote(f"+7{phone}")
-    url = f"https://www.google.com/search?q=site:t.me+{query}&num=20"
+async def search_caller_report(session, phone: str, ua: str) -> tuple:
+    url = f"https://caller.report/7{phone}"
     headers = {"User-Agent": ua}
     html = await fetch_text(session, url, headers)
     names = extract_names(html) if html else []
     links = extract_social_links(html) if html else []
-    return ("Telegram", names, links)
+    return ("CallerReport", names, links)
+
+async def search_tel_search(session, phone: str, ua: str) -> tuple:
+    url = f"https://tel.search.ch/?was={phone}"
+    headers = {"User-Agent": ua}
+    html = await fetch_text(session, url, headers)
+    names = extract_names(html) if html else []
+    links = extract_social_links(html) if html else []
+    return ("TelSearch", names, links)
 
 async def collect_data(phone: str, status_callback=None) -> dict:
-    """Сбор данных с обновлением статуса"""
     dadata_task = asyncio.create_task(probe_dadata(phone))
     all_names = []
     all_links = []
@@ -199,11 +252,12 @@ async def collect_data(phone: str, status_callback=None) -> dict:
 
     sources = [
         ("Google", search_google),
-        ("VK", search_vk),
-        ("Zvonili.com", search_zvonili),
+        ("Yandex", search_yandex),
+        ("Zvonili", search_zvonili),
         ("WhoCalls", search_whocalls),
-        ("Nomer.net", search_nomer),
-        ("Telegram", search_telegram)
+        ("Nomer", search_nomer),
+        ("CallerReport", search_caller_report),
+        ("TelSearch", search_tel_search)
     ]
 
     async with aiohttp.ClientSession() as session:
@@ -239,13 +293,21 @@ async def collect_data(phone: str, status_callback=None) -> dict:
 
     dadata_info = await dadata_task
 
-    all_names = list(dict.fromkeys(all_names))[:8]
-    all_links = list(dict.fromkeys(all_links))[:6]
+    # Убираем дубликаты имён и ссылок
+    seen_names = set()
+    unique_names = []
+    for n in all_names:
+        if n not in seen_names:
+            seen_names.add(n)
+            unique_names.append(n)
+    unique_names = unique_names[:8]
+
+    unique_links = list(dict.fromkeys(all_links))[:6]
 
     return {
         "dadata": dadata_info,
-        "names": all_names,
-        "links": all_links,
+        "names": unique_names,
+        "links": unique_links,
         "sources": sources_results,
         "total_sources": len(sources),
         "success_sources": sum(1 for s in sources_results.values() if s["status"] == "✅")
@@ -256,21 +318,17 @@ async def collect_data(phone: str, status_callback=None) -> dict:
 async def start(msg: Message):
     await msg.answer(
         "╔══════════════════════════╗\n"
-        "║   🛡 <b>SHADOW SCAN v8.0</b>   ║\n"
-        "║   Теневой пробив номера   ║\n"
+        "║   🛡 <b>SHADOW SCAN v9.0</b>   ║\n"
+        "║   Глубокий OSINT поиск    ║\n"
         "╚══════════════════════════╝\n"
         "\n"
-        "📡 <b>Источники поиска:</b>\n"
-        "▫ Google (поиск упоминаний)\n"
-        "▫ VK (поиск по телефону)\n"
-        "▫ Zvonili.com (определитель)\n"
-        "▫ WhoCalls.me (комментарии)\n"
-        "▫ Nomer.net (база номеров)\n"
-        "▫ Telegram (поиск каналов)\n"
-        "▫ DaData (оператор/регион)\n"
+        "📡 <b>Источники:</b> Google, Yandex, Zvonili,\n"
+        "WhoCalls, Nomer, CallerReport, TelSearch\n"
+        "➕ DaData (оператор/регион)\n"
         "\n"
         "🔄 <b>Ротация:</b> 12 браузеров\n"
         "⏱ <b>Макс. время:</b> 5 минут\n"
+        "📋 <b>3 варианта итогового отчёта</b>\n"
         "\n"
         "👇 <b>Отправьте номер телефона</b>",
         parse_mode=ParseMode.HTML
@@ -286,11 +344,11 @@ async def handle_input(msg: Message):
 
     phone = digits[-10:]
     formatted = f"+7 ({phone[0:3]}) {phone[3:6]}-{phone[6:8]}-{phone[8:10]}"
-    user_sessions[msg.from_user.id] = phone
+    user_sessions[msg.from_user.id] = {"phone": phone, "result": None}
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔎 НАЧАТЬ ГЛУБОКИЙ ПОИСК", callback_data="deep_scan")],
-        [InlineKeyboardButton(text="⚡ БЫСТРЫЙ ПОИСК (DaData)", callback_data="quick_scan")],
+        [InlineKeyboardButton(text="🔎 ГЛУБОКИЙ ПОИСК", callback_data="deep_scan")],
+        [InlineKeyboardButton(text="⚡ БЫСТРЫЙ (DaData)", callback_data="quick_scan")],
         [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel")]
     ])
 
@@ -310,16 +368,15 @@ async def handle_input(msg: Message):
 
 @dp.callback_query(F.data == "quick_scan")
 async def quick_scan(cb: CallbackQuery):
-    phone = user_sessions.get(cb.from_user.id)
-    if not phone:
-        await cb.answer("Сессия истекла. Отправь номер заново.", show_alert=True)
+    data = user_sessions.get(cb.from_user.id)
+    if not data:
+        await cb.answer("Сессия истекла.", show_alert=True)
         return
-
+    phone = data["phone"]
     formatted = f"+7 ({phone[0:3]}) {phone[3:6]}-{phone[6:8]}-{phone[8:10]}"
     status_msg = await cb.message.edit_text("⚡ <b>Быстрый поиск через DaData...</b>", parse_mode=ParseMode.HTML)
 
     dadata_info = await probe_dadata(phone)
-
     if dadata_info:
         d = dadata_info
         report = (
@@ -337,7 +394,6 @@ async def quick_scan(cb: CallbackQuery):
     else:
         report = "❌ <b>DaData не ответил.</b> Попробуйте глубокий поиск."
 
-    # Кнопки действий
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔎 ЗАПУСТИТЬ ГЛУБОКИЙ ПОИСК", callback_data="deep_scan")],
         [InlineKeyboardButton(text="🔙 НАЗАД К ВЫБОРУ", callback_data="back_to_choice")]
@@ -347,7 +403,6 @@ async def quick_scan(cb: CallbackQuery):
     await cb.answer()
 
 async def update_status(msg, done, total, current_source, browser):
-    """Обновляет сообщение со статусом"""
     bar_len = 10
     filled = int(bar_len * done / total)
     bar = "▓" * filled + "░" * (bar_len - filled)
@@ -361,10 +416,10 @@ async def update_status(msg, done, total, current_source, browser):
         f"Прогресс: [{bar}] {pct}%\n"
         f"Выполнено: {done}/{total}\n"
         f"\n"
-        f"🌐 <b>Текущий источник:</b> {current_source}\n"
+        f"🌐 <b>Источник:</b> {current_source}\n"
         f"🖥 <b>Браузер:</b> {browser}\n"
         f"\n"
-        f"⏳ <i>Пожалуйста, подождите...</i>"
+        f"⏳ <i>Ожидайте...</i>"
     )
     try:
         await msg.edit_text(status, parse_mode=ParseMode.HTML)
@@ -373,103 +428,187 @@ async def update_status(msg, done, total, current_source, browser):
 
 @dp.callback_query(F.data == "deep_scan")
 async def deep_scan(cb: CallbackQuery):
-    phone = user_sessions.get(cb.from_user.id)
-    if not phone:
-        await cb.answer("Сессия истекла. Отправь номер заново.", show_alert=True)
+    data = user_sessions.get(cb.from_user.id)
+    if not data:
+        await cb.answer("Сессия истекла.", show_alert=True)
         return
-
+    phone = data["phone"]
     formatted = f"+7 ({phone[0:3]}) {phone[3:6]}-{phone[6:8]}-{phone[8:10]}"
-    status_msg = await cb.message.edit_text("⏳ <b>Запуск поиска...</b>", parse_mode=ParseMode.HTML)
+    status_msg = await cb.message.edit_text("⏳ <b>Запуск глубокого поиска...</b>", parse_mode=ParseMode.HTML)
 
     async def status_callback(done, total, source, browser):
         await update_status(status_msg, done, total, source, browser)
 
     try:
-        data = await asyncio.wait_for(collect_data(phone, status_callback), timeout=300)
+        result = await asyncio.wait_for(collect_data(phone, status_callback), timeout=300)
     except asyncio.TimeoutError:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 ПОВТОРИТЬ", callback_data="deep_scan")],
             [InlineKeyboardButton(text="⚡ БЫСТРЫЙ ПОИСК", callback_data="quick_scan")],
             [InlineKeyboardButton(text="🔙 НАЗАД", callback_data="back_to_choice")]
         ])
-        await status_msg.edit_text("❌ <b>Превышено время поиска (5 мин)</b>\nПопробуйте ещё раз или используйте быстрый поиск.",
-                                   parse_mode=ParseMode.HTML, reply_markup=kb)
+        await status_msg.edit_text("❌ <b>Превышено время (5 мин)</b>", parse_mode=ParseMode.HTML, reply_markup=kb)
         await cb.answer()
         return
 
-    # Формируем красивый отчёт
-    d = data["dadata"]
-    report = (
-        f"╔══════════════════════════╗\n"
-        f"║   🕵️‍♂️ <b>ПОЛНЫЙ ОТЧЁТ</b>     ║\n"
-        f"╚══════════════════════════╝\n"
-        f"\n"
-        f"📞 <b>Номер:</b> <code>{formatted}</code>\n"
-    )
-    if d:
-        report += (
-            f"📡 <b>Оператор:</b> {d['operator']}\n"
-            f"📶 <b>Тип:</b> {d['type']}\n"
-            f"📍 <b>Регион:</b> {d['region']}\n"
-            f"🏙 <b>Город:</b> {d['city']}\n"
-            f"⏰ <b>Часовой пояс:</b> {d['timezone']}\n"
-        )
-    else:
-        report += "📡 <b>DaData:</b> не ответил\n"
-
-    report += "\n━━━━━━ <b>НАЙДЕННЫЕ ДАННЫЕ</b> ━━━━━━\n\n"
-
-    if data["names"]:
-        report += "👤 <b>Вероятные имена:</b>\n"
-        for i, name in enumerate(data["names"], 1):
-            report += f"  {i}. {name}\n"
-    else:
-        report += "👤 <b>Имён не найдено</b>\n"
-
-    report += "\n"
-
-    if data["links"]:
-        report += "🌐 <b>Ссылки на профили:</b>\n"
-        for i, link in enumerate(data["links"], 1):
-            short = link[:60] + "..." if len(link) > 60 else link
-            report += f"  {i}. {short}\n"
-    else:
-        report += "🌐 <b>Ссылок не найдено</b>\n"
-
-    report += (
-        f"\n━━━━━━ <b>СТАТИСТИКА</b> ━━━━━━\n"
-        f"\n"
-        f"📊 <b>Источников проверено:</b> {data['total_sources']}\n"
-        f"✅ <b>Успешно:</b> {data['success_sources']}\n"
-        f"❌ <b>Не ответили:</b> {data['total_sources'] - data['success_sources']}\n"
-        f"\n"
-        f"<i>Ротация: 12 браузеров</i>\n"
-    )
-
-    # Кнопки: вернуться или повторить
+    # Сохраняем результат в сессию
+    data["result"] = result
+    # Показываем выбор варианта отчёта
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 ПОВТОРИТЬ ПОИСК", callback_data="deep_scan")],
-        [InlineKeyboardButton(text="🔙 ВЕРНУТЬСЯ К ВЫБОРУ", callback_data="back_to_choice")]
+        [InlineKeyboardButton(text="1️⃣ ОСНОВНОЙ (DaData + имена)", callback_data="report_basic")],
+        [InlineKeyboardButton(text="2️⃣ РАСШИРЕННЫЙ (+ ссылки)", callback_data="report_extended")],
+        [InlineKeyboardButton(text="3️⃣ ТЕХНИЧЕСКИЙ ДАМП", callback_data="report_tech")],
+        [InlineKeyboardButton(text="🔙 НАЗАД К ВЫБОРУ РЕЖИМА", callback_data="back_to_choice")]
     ])
 
-    await status_msg.edit_text(report, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb)
+    await status_msg.edit_text(
+        "✅ <b>Поиск завершён!</b>\nВыберите вариант отчёта:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("report_"))
+async def show_report(cb: CallbackQuery):
+    data = user_sessions.get(cb.from_user.id)
+    if not data or not data.get("result"):
+        await cb.answer("Данные устарели. Повторите поиск.", show_alert=True)
+        return
+
+    result = data["result"]
+    d = result["dadata"]
+    phone = data["phone"]
+    formatted = f"+7 ({phone[0:3]}) {phone[3:6]}-{phone[6:8]}-{phone[8:10]}"
+
+    report_type = cb.data
+    report_text = ""
+
+    if report_type == "report_basic":
+        report_text = (
+            f"╔══════════════════════════╗\n"
+            f"║   📋 <b>ОСНОВНОЙ ОТЧЁТ</b>    ║\n"
+            f"╚══════════════════════════╝\n"
+            f"\n"
+            f"📞 <b>Номер:</b> <code>{formatted}</code>\n"
+        )
+        if d:
+            report_text += (
+                f"📡 <b>Оператор:</b> {d['operator']}\n"
+                f"📶 <b>Тип:</b> {d['type']}\n"
+                f"📍 <b>Регион:</b> {d['region']}\n"
+                f"🏙 <b>Город:</b> {d['city']}\n"
+                f"⏰ <b>Часовой пояс:</b> {d['timezone']}\n"
+            )
+        else:
+            report_text += "📡 <b>DaData:</b> не ответил\n"
+
+        report_text += "\n👤 <b>Вероятные имена:</b>\n"
+        if result["names"]:
+            for i, name in enumerate(result["names"], 1):
+                report_text += f"  {i}. {name}\n"
+        else:
+            report_text += "  (не найдены)\n"
+
+    elif report_type == "report_extended":
+        report_text = (
+            f"╔══════════════════════════╗\n"
+            f"║  🧩 <b>РАСШИРЕННЫЙ ОТЧЁТ</b>  ║\n"
+            f"╚══════════════════════════╝\n"
+            f"\n"
+            f"📞 <b>Номер:</b> <code>{formatted}</code>\n"
+        )
+        if d:
+            report_text += (
+                f"📡 <b>Оператор:</b> {d['operator']} ({d['type']})\n"
+                f"📍 <b>Регион:</b> {d['region']} / {d['city']}\n"
+                f"⏰ <b>Часовой пояс:</b> {d['timezone']}\n"
+            )
+        else:
+            report_text += "📡 <b>DaData:</b> не ответил\n"
+
+        report_text += "\n👤 <b>Имена:</b>\n"
+        if result["names"]:
+            for i, name in enumerate(result["names"], 1):
+                report_text += f"  {i}. {name}\n"
+        else:
+            report_text += "  (нет)\n"
+
+        report_text += "\n🌐 <b>Ссылки на профили:</b>\n"
+        if result["links"]:
+            for i, link in enumerate(result["links"], 1):
+                short = link[:60] + "..." if len(link) > 60 else link
+                report_text += f"  {i}. {short}\n"
+        else:
+            report_text += "  (нет)\n"
+
+    elif report_type == "report_tech":
+        report_text = (
+            f"╔══════════════════════════╗\n"
+            f"║  ⚙️ <b>ТЕХНИЧЕСКИЙ ДАМП</b>  ║\n"
+            f"╚══════════════════════════╝\n"
+            f"\n"
+            f"📞 <b>Цель:</b> <code>{formatted}</code>\n"
+            f"\n"
+            f"📊 <b>Статистика источников:</b>\n"
+        )
+        for src, info in result["sources"].items():
+            report_text += f"  {info['status']} {src} (браузер: {info['browser']})\n"
+        report_text += f"\n🔍 <b>Успешно:</b> {result['success_sources']}/{result['total_sources']}\n"
+        report_text += f"\n👤 <b>Собрано имён:</b> {len(result['names'])}\n"
+        report_text += f"🌐 <b>Собрано ссылок:</b> {len(result['links'])}\n"
+        # покажем сырые данные кратко
+        if result["names"]:
+            report_text += "\n<b>Имена:</b> " + ", ".join(result["names"]) + "\n"
+        if result["links"]:
+            report_text += "\n<b>Ссылки:</b>\n"
+            for l in result["links"]:
+                report_text += f"  • {l}\n"
+
+    # Кнопки: другой вариант, назад к выбору, в начало
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1️⃣ Основной", callback_data="report_basic"),
+         InlineKeyboardButton(text="2️⃣ Расширенный", callback_data="report_extended")],
+        [InlineKeyboardButton(text="3️⃣ Технический", callback_data="report_tech")],
+        [InlineKeyboardButton(text="🔙 НАЗАД К ВЫБОРУ ИТОГОВ", callback_data="back_to_reports")],
+        [InlineKeyboardButton(text="🔄 ПОВТОРИТЬ ПОИСК", callback_data="deep_scan")]
+    ])
+
+    await cb.message.edit_text(report_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=kb)
+    await cb.answer()
+
+@dp.callback_query(F.data == "back_to_reports")
+async def back_to_reports(cb: CallbackQuery):
+    """Вернуться к выбору варианта отчёта после завершения поиска"""
+    data = user_sessions.get(cb.from_user.id)
+    if not data or not data.get("result"):
+        await cb.answer("Данные устарели.", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1️⃣ ОСНОВНОЙ", callback_data="report_basic")],
+        [InlineKeyboardButton(text="2️⃣ РАСШИРЕННЫЙ", callback_data="report_extended")],
+        [InlineKeyboardButton(text="3️⃣ ТЕХНИЧЕСКИЙ", callback_data="report_tech")],
+        [InlineKeyboardButton(text="🔙 НАЗАД К ВЫБОРУ РЕЖИМА", callback_data="back_to_choice")]
+    ])
+    await cb.message.edit_text(
+        "✅ <b>Поиск завершён!</b>\nВыберите вариант отчёта:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb
+    )
     await cb.answer()
 
 @dp.callback_query(F.data == "back_to_choice")
 async def back_to_choice(cb: CallbackQuery):
-    phone = user_sessions.get(cb.from_user.id)
-    if not phone:
+    data = user_sessions.get(cb.from_user.id)
+    if not data:
         await cb.answer("Сессия истекла.", show_alert=True)
         return
-
+    phone = data["phone"]
     formatted = f"+7 ({phone[0:3]}) {phone[3:6]}-{phone[6:8]}-{phone[8:10]}"
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔎 ГЛУБОКИЙ ПОИСК", callback_data="deep_scan")],
-        [InlineKeyboardButton(text="⚡ БЫСТРЫЙ ПОИСК", callback_data="quick_scan")],
+        [InlineKeyboardButton(text="⚡ БЫСТРЫЙ (DaData)", callback_data="quick_scan")],
         [InlineKeyboardButton(text="❌ ОТМЕНА", callback_data="cancel")]
     ])
-
     await cb.message.edit_text(
         f"╔══════════════════════════╗\n"
         f"║      🎯 <b>НОВАЯ ЦЕЛЬ</b>      ║\n"
